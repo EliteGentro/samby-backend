@@ -23,6 +23,7 @@ ASSUMPTIONS = {
     'backlog_reservation_overlap', 'supplier_terms_id', 'customer_terms_id', 'terms_accepted', 'terms_no_advance_confirmed',
     'demand_cash_treatment', 'purchase_cash_treatment', 'purchase_paid_amount', 'purchase_invoice_date',
     'invoice_delay_days', 'customer_order_date', 'customer_advance_received', 'new_credit_sales_amount', 'new_credit_sales_date', 'unpaid_share', 'order_policy', 'reorder_point', 'safety_stock', 'service_target', 'discount_percent',
+    'asem_stress',
 }
 
 
@@ -102,7 +103,7 @@ class AnalysisConfig(BaseModel):
             elif name in {'collection_id', 'purchase_id', 'supplier_terms_id', 'customer_terms_id', 'payment_id'}:
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f'{name} must identify a supplied record.')
-            elif name in {'stock_opening_confirmed', 'opening_backlog_confirmed', 'terms_accepted', 'terms_no_advance_confirmed', 'payment_change_accepted', 'supplier_payment_before_dispatch'}:
+            elif name in {'stock_opening_confirmed', 'opening_backlog_confirmed', 'terms_accepted', 'terms_no_advance_confirmed', 'payment_change_accepted', 'supplier_payment_before_dispatch', 'asem_stress'}:
                 if not isinstance(value, bool):
                     raise ValueError(f'{name} must be true or false.')
             elif name in {'order_policy', 'backlog_policy', 'backlog_reservation_overlap', 'demand_cash_treatment', 'purchase_cash_treatment'}:

@@ -162,11 +162,15 @@ def finance_inputs(config: dict, workspace: dict, families: set[str]) -> dict:
         warnings.append('Financial results use the supplied business-wide financial records. The selected product/location filters apply only to inventory and demand because financial records have no location allocation.')
     selected_collection = assumptions.get('collection_id')
     delay = int(assumptions.get('collection_delay_days') or 0)
+    if assumptions.get('asem_stress'):
+        delay += 76
+        warnings.append('Estrés ASEM aplicado (+76 días): Se adicionaron 76 días de retraso empírico oficial de PyMEs a las proyecciones de cobro.')
     question = config['question']
-    change_all_collections = not selected_collection and assumptions.get('collection_delay_days') is not None and question in {'Q-CUSTOMER-DEBT', 'Q-CASH-SUFFICIENCY', 'Q-EXPLORE'}
-    if question == 'Q-CRITICAL-COLLECTION' and (not selected_collection or assumptions.get('collection_delay_days') is None):
+    has_collection_assumption = assumptions.get('collection_delay_days') is not None or bool(assumptions.get('asem_stress'))
+    change_all_collections = not selected_collection and has_collection_assumption and question in {'Q-CUSTOMER-DEBT', 'Q-CASH-SUFFICIENCY', 'Q-EXPLORE'}
+    if question == 'Q-CRITICAL-COLLECTION' and (not selected_collection or not has_collection_assumption):
         raise InputError('Select a collection and enter its changed collection delay in calendar days.')
-    if question == 'Q-CUSTOMER-DEBT' and assumptions.get('collection_delay_days') is None:
+    if question == 'Q-CUSTOMER-DEBT' and not has_collection_assumption:
         raise InputError('Enter the explicit customer collection-delay assumption.')
     if selected_collection and selected_collection not in records:
         raise InputError('The selected collection is missing from the submitted snapshot.')
