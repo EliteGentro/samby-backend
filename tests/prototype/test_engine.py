@@ -454,3 +454,55 @@ def test_pool_cannot_assume_location_for_an_unallocated_purchase(workspace, conf
     cfg['inventory_pool_id'] = 'pool'
     with pytest.raises(InputError, match='no destination location'):
         execute('simulation', cfg, workspace, 'unallocated')
+
+
+def test_execute_poison_apple_end_to_end(workspace, config):
+    config['question'] = 'Q-POISON-APPLE'
+    config['horizon_days'] = 90
+    config['assumptions'] = {
+        'poison_order_amount': 1000000,
+        'poison_margin_pct': 40,
+        'poison_supplier_advance_pct': 50,
+        'poison_supplier_balance_days': 30,
+        'poison_customer_days': 60,
+        'poison_fixed_daily_costs': 5000,
+        'cash_opening_estimate': 375000,
+    }
+    config['output_families'] = ['cash']
+    result = execute('simulation', config, workspace, 'poison-run')
+    assert values(result)['insolvency_day'] == 15
+    assert values(result)['gross_margin_pct'] == 40
+    assert result['series'][15]['cash'] < 0
+
+
+def test_execute_dead_stock_end_to_end(workspace, config):
+    config['question'] = 'Q-DEAD-STOCK'
+    config['assumptions'] = {
+        'dio_threshold': 120,
+        'liquidation_discount_pct': 30,
+        'liquidation_days': 30,
+        'holding_cost_daily_pct': 0.05,
+        'cash_opening_estimate': 50000,
+    }
+    config['output_families'] = ['cash']
+    # p1 in workspace stock has 10 onHand, cost 2. If 0 sales in period, DIO is infinite -> candidate!
+    workspace['sales'] = []
+    result = execute('simulation', config, workspace, 'dead-stock-run')
+    assert values(result)['total_candidates'] == 1
+    assert values(result)['total_locked_capital'] == 20
+    assert len(result['series']) == config['horizon_days']
+
+
+def test_execute_treasury_stress_with_payroll_cliff(workspace, config):
+    config['question'] = 'Q-TREASURY-STRESS'
+    config['assumptions'] = {
+        'payroll_amount': 200,
+        'payroll_dates': ['2026-09-13'],
+        'payroll_buffer_days': 2,
+    }
+    config['output_families'] = ['cash']
+    workspace['cash']['amount'] = 100
+    workspace['finance'] = [event('collection1', 500, '2026-09-13', 'receivable')]
+    result = execute('simulation', config, workspace, 'treasury-stress-run')
+    assert values(result)['payroll_reserve_required'] == 200
+    assert any('payroll' in explanation.lower() for explanation in result['explanations'])
