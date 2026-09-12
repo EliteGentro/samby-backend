@@ -1,100 +1,53 @@
-# Backend
+# Samby backend
 
-FastAPI boilerplate with async PostgreSQL/Neon, Redis-backed SSE, native JWT authentication, and a provider-neutral AI layer. Swagger UI is generated at `/docs`; the OpenAPI schema is at `/openapi.json`.
+`app.main:app` is the integrated Samby API. It runs durable workspaces, guest/account access, enforced member roles, native Excel preview and asynchronous forecasting/simulation on local SQLite. PostgreSQL and Redis are not needed for this application.
 
-## Requirements and dependencies
+## Run locally
 
-- Python 3.12+
-- FastAPI + Uvicorn: HTTP application and generated Swagger UI
-- SQLAlchemy + asyncpg: asynchronous PostgreSQL ORM access
-- Alembic: database migration history
-- redis-py: bounded async Redis pool and pub/sub
-- PyJWT: application-issued access tokens
-- pwdlib + Argon2: one-way password hashing
-- HTTPX: AI-provider HTTP client
-- Pydantic Settings: typed environment configuration
-- pytest + pytest-asyncio: unit, integration, and live health tests
-
-## Setup
-
-```bash
-cp .env.example .env
+```sh
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/alembic upgrade head
-.venv/bin/uvicorn app.main:app --reload
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --no-access-log
 ```
 
-Set `DATABASE_URL` to the Neon connection string (the settings layer converts common hosted PostgreSQL URL formats to asyncpg) and generate a unique `JWT_SECRET` of at least 32 random characters. Registration stores a normalized email, optional name, Argon2 password hash, account status, and timestamps in the `users` table. Login verifies the hash and returns a short-lived application-signed access token. Access tokens are not persisted in PostgreSQL.
+On macOS, install LightGBM's runtime with `brew install libomp`. The standalone `app.prototype.main:app` exposes the same `/api/prototype` platform. The original main entry point also exposes account-compatible `/api/v1/auth/*` routes. Swagger documentation is at `/docs`.
 
-## Routes
+See [local service instructions](README-prototype.md) for credential handling, workbook limits, worker recovery and legacy ownership migration. The [platform contract](docs/platform-contract.md) specifies routes and role boundaries; the [analytical contract](docs/analytical-contract-v2.md) specifies numerical inputs and persisted results.
 
-- `GET /api/v1/health/live`: process-only liveness
-- `GET /api/v1/health/ready`: PostgreSQL and Redis readiness
-- `POST /api/v1/auth/register`: create a user and issue a JWT
-- `POST /api/v1/auth/login`: verify credentials and issue a JWT
-- `GET /api/v1/auth/me`: return the current database-backed user
-- `GET|POST /api/v1/examples`: protected SQLAlchemy REST example
-- `GET /api/v1/events/stream`: protected Redis pub/sub SSE stream
-- `POST /api/v1/events`: publish an SSE example event
-- `POST /api/v1/ai/chat/stream`: protected AI stream, normalized to SSE
+## State and recovery
 
-All routes except health, registration, and login require `Authorization: Bearer <access-token>`. JWT validation checks signature, issuer, audience, timestamps, token type, and subject; protected requests also confirm the user still exists and is active in PostgreSQL.
+The default database is `app/prototype/data/samby.sqlite3`. `SAMBY_PROTOTYPE_DB` can select another database. Current business records and analytical resources are durable; browser storage is only a credential/cache/draft convenience. Submitted run inputs and completed artifacts remain immutable after current-data edits.
 
-## AI provider boundary
+Create a consistent backup while the service is running:
 
-Routes depend on `AIProvider`, not OpenRouter. Provider-independent request options include model, output-token limit, temperature, whether reasoning may be returned, reasoning effort, and a reasoning-token budget. To add a provider:
-
-1. Implement `AIProvider` under `app/services/ai/`.
-2. Translate the normalized options in that adapter.
-3. Add its selection to `factory.py` and set `AI_PROVIDER`.
-
-`RollingContextWindow` retains system messages and the newest conversation turns using an intentionally approximate token count. Use the target model's tokenizer before relying on exact limits in production. Thinking/reasoning is only surfaced when both the caller asks for it and the selected model/provider exposes it; some providers intentionally do not return hidden reasoning.
-
-## Redis free-tier guardrails
-
-- The shared pool defaults to five connections and is capped at twenty by validation.
-- Use Redis for short-lived coordination, cache entries with a TTL, and pub/sub—not as the source of truth.
-- The local container is capped at 32 MB and uses `allkeys-lru` to expose memory assumptions early.
-- Pub/sub is transient: clients that disconnect miss events. Persist important events in PostgreSQL first.
-- Avoid one Redis connection per SSE client at meaningful scale. Replace this example with one subscriber plus an in-process fan-out or a managed event service as concurrency grows.
-
-## Tests
-
-Normal tests are deterministic and do not call external services:
-
-```bash
-.venv/bin/pytest tests/unit tests/integration
+```sh
+.venv/bin/python -m app.prototype.backup --destination /absolute/path/samby-backup.sqlite3
 ```
 
-Live dependency checks are isolated and use `.env`:
+The backup command includes SQLite WAL contents and checks database integrity. It refuses to overwrite a file. A backup contains business records, password/session hashes and analytical histories; access to the file grants administrative control over the local data. To recover, stop the service and start it with `SAMBY_PROTOTYPE_DB` pointing to a verified backup or a retained copy. Keep the original database until recovery is verified.
 
-```bash
-.venv/bin/pytest tests/health -m health -v
+Records are retained indefinitely in this local version. Archive is reversible and does not delete snapshots, referenced results or current documents. No automatic retention purge or destructive per-record analytical deletion runs. Workspace JSON export is available through authenticated `GET /api/prototype/workspaces/{id}/export`; it includes the current document and revision, not account credentials or the full run history. The database backup preserves those histories.
+
+Guest access requires its private key. Account sessions last 30 days and can be revoked by logout. Passwords use salted scrypt. Ten failed logins for an email/client pair within 15 minutes trigger a persistent temporary limit; errors do not disclose whether an email exists. Owners manage registered members without sending invitation messages. Account email delivery, external identity providers and external deployment are not configured.
+
+Old unprotected UUID-only histories require explicit local assignment to an already registered account:
+
+```sh
+.venv/bin/python -m app.prototype.ownership --workspace-id OLD_UUID --owner-email REGISTERED_EMAIL
 ```
 
-The OpenRouter health check calls the authenticated `/key` metadata endpoint, not a completion, so it validates the key without intentionally consuming generation credits. Do not run live health checks on every unit-test invocation.
+This attaches retained history without changing saved inputs or results. No real account or namespace is automatically selected for migration, and no public endpoint can claim history from knowing its ID.
 
-## Structure
+## Verify
 
-```text
-backend/
-├── app/
-│   ├── api/routes/       Thin REST, SSE, auth, AI, and health handlers
-│   ├── core/             Typed settings, password hashing, and JWT verification
-│   ├── db/               Async engine, sessions, and declarative base
-│   ├── models/           SQLAlchemy persistence models
-│   ├── schemas/          Pydantic API contracts
-│   ├── services/
-│   │   ├── ai/           Provider interface, factory, and adapters
-│   │   ├── context_window.py
-│   │   └── redis.py
-│   └── main.py           FastAPI composition root
-├── migrations/           Alembic environment and immutable revisions
-└── tests/
-    ├── unit/             Pure component tests
-    ├── integration/      In-process API integration tests
-    └── health/           Explicit live dependency checks
+```sh
+.venv/bin/python -m pytest -q
 ```
 
-Keep route handlers thin, put business rules in services, persistence in repositories as the domain grows, and always create a new Alembic revision rather than editing a deployed revision.
+Tests cover arithmetic and training, async lifecycle, immutable history, cancellation/recovery, namespace access, role enforcement, revision conflicts, native XLSX/XLS parsing, export and backup.
+
+## Optional template services
+
+The prior PostgreSQL/Redis/AI template modules remain under `app/api`, `app/core`, `app/db` and `app/services`. `SAMBY_ENABLE_LEGACY_TEMPLATE=1` mounts their optional example, health, Redis and AI routes after installing `.[legacy]` and configuring their external services. They are separate from the local platform's account sessions and are not required or advertised as part of its business workflow. No provider call, bank transaction, email invitation or external deployment is performed by the default app.
+
+The default test selection is `tests/prototype` plus `tests/integration`; the latter now exercises the integrated app lifespan and account aliases. Retained `tests/unit` and `tests/health` concern optional template services and require `.[legacy,legacy-tests]` plus their external configuration. `prototype-requirements.txt` remains an exact pinned alternative for the same local runtime/test dependencies.

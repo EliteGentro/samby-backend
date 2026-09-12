@@ -3,27 +3,39 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "base-monolith-backend"
-version = "0.1.0"
-description = "Neutral FastAPI base monolith"
+name = "samby-backend"
+version = "0.4.0"
+description = "Samby durable business workspaces and asynchronous financial and inventory analytics"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi==0.141.1",
+  "uvicorn==0.52.4",
+  "httpx==0.28.1",
+  "openpyxl==3.1.5",
+  "xlrd==2.0.2",
+  "python-multipart==0.0.32",
+  "lightgbm==4.7.0",
+  "catboost==1.2.10",
+  "numpy==2.5.3",
+  "scikit-learn==1.9.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.1.1",
+  "xlwt==1.3.0",
+]
+legacy = [
   "alembic>=1.20,<2",
   "asyncpg>=0.30,<1",
-  "fastapi>=0.141,<1",
-  "httpx>=0.28,<1",
   "pydantic-settings>=2.15,<3",
   "PyJWT>=2.14,<3",
   "pwdlib[argon2]>=0.3,<1",
   "redis>=8.1,<9",
   "sqlalchemy[asyncio]>=2.0.52,<3",
-  "uvicorn[standard]>=0.41,<1",
 ]
-
-[project.optional-dependencies]
-dev = [
+legacy-tests = [
   "aiosqlite>=0.22,<1",
-  "pytest>=9.1,<10",
   "pytest-asyncio>=1.3,<2",
   "pytest-cov>=7,<8",
 ]
@@ -33,8 +45,7 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
-asyncio_mode = "auto"
-testpaths = ["tests/unit", "tests/integration"]
+testpaths = ["tests/prototype", "tests/integration"]
 markers = [
-  "health: live dependency checks; run separately with pytest tests/health -m health",
+  "health: optional legacy live dependency checks; run separately with pytest tests/health -m health",
 ]

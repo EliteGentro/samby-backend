@@ -4,3 +4,7 @@ __pycache__
 .pytest_cache
 .coverage
 tests
+app/prototype/data/
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm
