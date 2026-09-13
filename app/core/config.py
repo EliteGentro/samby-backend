@@ -36,13 +36,26 @@ class Settings(BaseSettings):
     jwt_audience: str = "base-monolith-web"
     jwt_access_token_expire_minutes: int = Field(default=60, ge=5, le=10080)
 
-    ai_provider: str = "openrouter"
+    ai_provider: Literal["openrouter", "gemini"] = "openrouter"
+    ai_provider_fallback: Literal["openrouter", "gemini"] | None = None
     ai_context_max_tokens: int = Field(default=12000, ge=100)
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4.1-mini"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str = "http://localhost:5173"
     openrouter_app_name: str = "Base Monolith"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+
+    eleven_labs_api_key: str = ""
+    eleven_labs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    eleven_labs_model: str = "eleven_flash_v2_5"
+    eleven_labs_base_url: str = "https://api.elevenlabs.io/v1"
+
+    @field_validator("ai_provider_fallback", mode="before")
+    @classmethod
+    def blank_fallback_is_disabled(cls, value):
+        return None if value == "" else value
 
     @field_validator("database_url", mode="before")
     @classmethod

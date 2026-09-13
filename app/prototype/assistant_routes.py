@@ -2,11 +2,13 @@ import json
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
+import httpx
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.assistant.repository import AssistantRepository
 from app.services.assistant.service import AssistantService
+from app.services.speech import ElevenLabsSpeechService
 
 from .platform import Platform
 from .store import ResourceError, Store
@@ -45,6 +47,10 @@ def repository(request: Request) -> AssistantRepository:
 
 def assistant(request: Request) -> AssistantService:
     return request.app.state.assistant_service
+
+
+def speech(request: Request) -> ElevenLabsSpeechService:
+    return request.app.state.speech_service
 
 
 router = APIRouter(prefix="/api/prototype/workspaces/{workspace_id}/assistant", tags=["assistant"])
@@ -91,3 +97,50 @@ async def create_message(
         raise ResourceError(502, "Samby Guide could not answer right now. Your question was saved; try again shortly.") from error
     repo.add_message(access["workspace_id"], access["actor"], session_id, "assistant", answer, body.page, sources)
     return repo.get(access["workspace_id"], access["actor"], session_id)
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/speech")
+async def create_speech(
+    session_id: str,
+    message_id: str,
+    access: dict = Depends(assistant_access),
+    repo: AssistantRepository = Depends(repository),
+    voice: ElevenLabsSpeechService = Depends(speech),
+):
+    message = repo.get_message(
+        access["workspace_id"], access["actor"], session_id, message_id
+    )
+    if message["role"] != "assistant":
+        raise ResourceError(422, "Only Samby Guide answers can be spoken.")
+    try:
+        audio = await voice.synthesize(message["content"])
+    except RuntimeError as error:
+        if "API_KEY" in str(error):
+            raise ResourceError(503, "Samby voice is not configured right now.") from error
+        logger.exception("Samby voice returned invalid audio")
+        raise ResourceError(502, "Samby could not create audio for this answer.") from error
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 402:
+            raise ResourceError(
+                402,
+                "The selected ElevenLabs voice requires a paid plan. Choose a default voice or upgrade the ElevenLabs account.",
+            ) from error
+        if error.response.status_code in {401, 403}:
+            raise ResourceError(
+                503, "The ElevenLabs API key was rejected. Check the server configuration."
+            ) from error
+        logger.warning(
+            "Samby voice provider returned status %s", error.response.status_code
+        )
+        raise ResourceError(502, "Samby could not create audio for this answer.") from error
+    except (httpx.HTTPError, ValueError) as error:
+        logger.warning("Samby voice failed: %s", type(error).__name__)
+        raise ResourceError(502, "Samby could not create audio for this answer.") from error
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

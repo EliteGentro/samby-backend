@@ -8,10 +8,10 @@ Samby Guide is a contextual assistant for Home, Inventory, Dashboards, Forecast 
 2. Workspace authentication is enforced with the same account token or private guest key used by the rest of Samby.
 3. The backend retrieves page-relevant chunks from the curated Samby behavior corpus.
 4. Deterministic calculators produce the page's baseline inventory, finance, sales, and data-quality facts from the latest saved workspace document.
-5. OpenRouter receives the recent conversation, retrieved behavior, and calculated facts. The configured `OPENROUTER_MODEL` can request additional record searches or metric groups through function tools.
+5. The provider selected by `AI_PROVIDER` receives the recent conversation, retrieved behavior, and calculated facts. If it returns HTTP 403 and `AI_PROVIDER_FALLBACK` names a different provider, the request is retried once with that provider and its configured model. The configured `OPENROUTER_MODEL` or `GEMINI_MODEL` can request additional record searches or metric groups through function tools.
 6. Tool requests execute against the already-authorized workspace. The final answer and its source labels are persisted in PostgreSQL.
 
-The OpenRouter key remains server-side. The browser never receives provider credentials or raw provider payloads.
+Provider keys remain server-side. The browser never receives provider credentials or raw provider payloads. The Gemini adapter uses the Google GenAI Interactions API and translates its steps into the same application-level messages used by the OpenRouter adapter. When voice mode requests audio, the backend verifies that the selected message is a saved assistant answer owned by the current workspace actor, removes Markdown presentation syntax, and sends only that answer to ElevenLabs.
 
 ## Persistence and access
 
@@ -23,6 +23,7 @@ The API surface is:
 - `POST /api/prototype/workspaces/{workspace_id}/assistant/sessions`
 - `GET /api/prototype/workspaces/{workspace_id}/assistant/sessions/{session_id}`
 - `POST /api/prototype/workspaces/{workspace_id}/assistant/sessions/{session_id}/messages`
+- `POST /api/prototype/workspaces/{workspace_id}/assistant/sessions/{session_id}/messages/{message_id}/speech`
 
 Read-only workspace roles may ask questions, but the guide cannot mutate business records, submit forecasts, execute simulations, or perform transactions.
 
@@ -40,4 +41,4 @@ Unknown reservations and missing product costs are counted explicitly. Inventory
 
 ## Frontend behavior
 
-Each page offers a one-time orientation modal for each workspace. Accepting it creates a dedicated page conversation and returns a grounded summary in the same modal. The guide can then remain docked on the right or be minimized to the `Ask Samby` control in the top bar. Conversation selection and new-thread creation are available in the docked panel. The panel becomes an overlay on narrower screens.
+Each page offers a one-time orientation modal for each workspace. Accepting it creates a dedicated page conversation and returns a grounded summary in the same modal. The guide can then remain docked on the right or be minimized to the `Ask Samby` control in the top bar. Conversation selection and new-thread creation are available in the docked panel. Voice mode is persisted on the device and automatically plays new answers; every saved assistant answer also has an explicit listen/stop control. Generated audio is cached only in memory for the current browser session. The panel becomes an overlay on narrower screens.

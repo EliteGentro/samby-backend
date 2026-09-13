@@ -1,9 +1,9 @@
 import json
-from typing import Any
 
 import httpx
 
 from app.core.config import Settings
+from app.services.ai.base import AIProvider
 from app.services.ai.models import AIOptions, ChatMessage
 from app.services.context_window import RollingContextWindow
 
@@ -61,7 +61,7 @@ TOOLS = [
 
 
 class AssistantService:
-    def __init__(self, provider: Any, settings: Settings):
+    def __init__(self, provider: AIProvider, settings: Settings):
         self.provider = provider
         self.settings = settings
 
