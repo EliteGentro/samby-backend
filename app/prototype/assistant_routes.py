@@ -15,7 +15,7 @@ from .store import ResourceError, Store
 
 
 logger = logging.getLogger(__name__)
-Page = Literal["home", "inventory", "dashboards", "analysis", "finance", "data", "settings"]
+Page = Literal["home", "insights", "inventory", "dashboards", "analysis", "finance", "data", "settings"]
 
 
 class SessionCreate(BaseModel):
