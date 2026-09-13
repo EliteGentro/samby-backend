@@ -24,6 +24,12 @@ from app.services.speech import ElevenLabsSpeechService
 
 logger = logging.getLogger(__name__)
 
+LOCAL_FRONTEND_ORIGINS = [
+    f'http://{host}:{port}'
+    for host in ('localhost', '127.0.0.1')
+    for port in (4173, 5173)
+]
+
 
 class ArchivePatch(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
@@ -85,7 +91,12 @@ def create_app(database_url: str | None = None, start_worker: bool = True, poll_
             await close_ai_provider()
 
     application = FastAPI(title='Samby local analytical prototype', version='0.4.0', lifespan=lifespan)
-    application.add_middleware(CORSMiddleware, allow_origins=[f'http://{host}:{port}' for host in ('localhost', '127.0.0.1') for port in (4173, 5173)], allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-Workspace-ID', 'X-Workspace-Key', 'Authorization'], allow_credentials=False)
+    frontend_origin = get_settings().frontend_origin.strip().rstrip('/')
+    allowed_origins = list(dict.fromkeys([
+        *LOCAL_FRONTEND_ORIGINS,
+        *([frontend_origin] if frontend_origin else []),
+    ]))
+    application.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-Workspace-ID', 'X-Workspace-Key', 'Authorization'], allow_credentials=False)
     application.include_router(platform_router)
     application.include_router(assistant_router)
 

@@ -300,12 +300,22 @@ def test_api_unsupported_user_data_creates_no_fixture_run(postgres_url, workspac
         assert client.get('/api/prototype/runs', headers=headers).json() == []
 
 
-def test_only_local_frontend_origins_receive_cors_permission(postgres_url):
-    with TestClient(create_app(postgres_url, start_worker=False)) as client:
-        good = client.options('/api/prototype/runs', headers={'Origin': 'http://127.0.0.1:5173', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'x-workspace-id'})
-        assert good.headers['access-control-allow-origin'] == 'http://127.0.0.1:5173'
-        bad = client.options('/api/prototype/runs', headers={'Origin': 'https://example.com', 'Access-Control-Request-Method': 'GET'})
-        assert 'access-control-allow-origin' not in bad.headers
+def test_local_and_configured_frontend_origins_receive_cors_permission(postgres_url, monkeypatch):
+    from app.core.config import get_settings
+
+    hosted_origin = 'https://samby.example.com'
+    monkeypatch.setenv('FRONTEND_ORIGIN', f'{hosted_origin}/')
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app(postgres_url, start_worker=False)) as client:
+            local = client.options('/api/prototype/runs', headers={'Origin': 'http://127.0.0.1:5173', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'x-workspace-id'})
+            assert local.headers['access-control-allow-origin'] == 'http://127.0.0.1:5173'
+            hosted = client.options('/api/prototype/runs', headers={'Origin': hosted_origin, 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'x-workspace-id'})
+            assert hosted.headers['access-control-allow-origin'] == hosted_origin
+            bad = client.options('/api/prototype/runs', headers={'Origin': 'https://example.com', 'Access-Control-Request-Method': 'GET'})
+            assert 'access-control-allow-origin' not in bad.headers
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize('failure', ['exception', 'timeout'])

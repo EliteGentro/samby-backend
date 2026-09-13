@@ -20,7 +20,7 @@ brew install libomp
 
 `app.prototype.main:app` remains an equivalent standalone entry point. The integrated entry point also supplies `/api/v1/auth/*` compatibility routes. PostgreSQL is required; Redis is not. The previous template's examples, Redis events, health and AI routes are opt-in through `SAMBY_ENABLE_LEGACY_TEMPLATE=1` and require their original dependencies.
 
-The service health endpoint is `http://127.0.0.1:8001/api/prototype/health`. Frontend origins `localhost` and `127.0.0.1` on ports 5173 and 4173 are allowed.
+The service health endpoint is `http://127.0.0.1:8001/api/prototype/health`. Frontend origins `localhost` and `127.0.0.1` on ports 5173 and 4173 are allowed. Set `FRONTEND_ORIGIN` to the deployed frontend origin (for example, `https://samby.example.com`, without a path) to grant it CORS access as well.
 
 ## PostgreSQL storage and access
 
