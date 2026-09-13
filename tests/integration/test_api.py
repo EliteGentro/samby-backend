@@ -5,8 +5,8 @@ from app.main import create_integrated_app
 
 
 @pytest.fixture
-def client(tmp_path):
-    with TestClient(create_integrated_app(tmp_path / 'integration.sqlite3', start_worker=False)) as client:
+def client(postgres_url):
+    with TestClient(create_integrated_app(postgres_url, start_worker=False)) as client:
         yield client
 
 
@@ -14,7 +14,7 @@ def test_liveness(client):
     response = client.get('/api/prototype/health')
     assert response.status_code == 200
     assert response.json()['status'] == 'ok'
-    assert response.json()['persistence'] == 'sqlite'
+    assert response.json()['persistence'] == 'postgresql'
 
 
 def test_protected_route_rejects_missing_token(client):

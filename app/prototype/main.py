@@ -1,8 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import logging
-import os
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
@@ -12,10 +10,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .engine import execute
+from app.db.migrations import upgrade_database
 from .schema import DefinitionCreate, DefinitionPatch, InputError, RunCreate
 from .store import ResourceError, Store
 from .platform import Platform
 from .platform_routes import namespace, router as platform_router
+from .assistant_routes import router as assistant_router
+from app.core.config import get_settings
+from app.services.ai.openrouter import OpenRouterProvider
+from app.services.assistant.service import AssistantService
 
 
 logger = logging.getLogger(__name__)
@@ -53,14 +56,16 @@ async def worker_loop(store: Store, worker_id: str, poll_seconds: float, timeout
             await asyncio.to_thread(store.finish, workspace_id, run['id'], worker_id, error='The local analytical worker encountered an unexpected error. The original inputs were retained. Check the service log and retry as a new run.')
 
 
-def create_app(database_path: str | Path | None = None, start_worker: bool = True, poll_seconds: float = 0.1, timeout_seconds: float = 15) -> FastAPI:
-    path = database_path or os.environ.get('SAMBY_PROTOTYPE_DB') or Path(__file__).parent / 'data' / 'samby.sqlite3'
+def create_app(database_url: str | None = None, start_worker: bool = True, poll_seconds: float = 1.0, timeout_seconds: float = 15) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        store = Store(path)
+        await asyncio.to_thread(upgrade_database, database_url)
+        store = Store(database_url)
         application.state.store = store
         application.state.platform = Platform(store)
+        ai_provider = OpenRouterProvider(get_settings())
+        application.state.assistant_service = AssistantService(ai_provider, get_settings())
         worker_id = str(uuid4())
         await asyncio.to_thread(store.maintain)
         task = asyncio.create_task(worker_loop(store, worker_id, poll_seconds, timeout_seconds)) if start_worker else None
@@ -72,10 +77,13 @@ def create_app(database_path: str | Path | None = None, start_worker: bool = Tru
                 with suppress(asyncio.CancelledError):
                     await task
                 await asyncio.to_thread(store.release_worker, worker_id)
+            await asyncio.to_thread(store.close)
+            await ai_provider.close()
 
     application = FastAPI(title='Samby local analytical prototype', version='0.4.0', lifespan=lifespan)
     application.add_middleware(CORSMiddleware, allow_origins=[f'http://{host}:{port}' for host in ('localhost', '127.0.0.1') for port in (4173, 5173)], allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-Workspace-ID', 'X-Workspace-Key', 'Authorization'], allow_credentials=False)
     application.include_router(platform_router)
+    application.include_router(assistant_router)
 
     @application.exception_handler(ResourceError)
     async def resource_error(_request: Request, error: ResourceError):
@@ -95,7 +103,7 @@ def create_app(database_path: str | Path | None = None, start_worker: bool = Tru
 
     @application.get('/api/prototype/health')
     def health():
-        return {'status': 'ok', 'mode': 'local-prototype', 'version': '0.4.0', 'persistence': 'sqlite', 'worker': start_worker}
+        return {'status': 'ok', 'mode': 'platform', 'version': '0.4.0', 'persistence': 'postgresql', 'worker': start_worker}
 
     @application.post('/api/prototype/definitions', status_code=201)
     def create_definition(body: DefinitionCreate, request: Request, workspace: str = Depends(namespace), repository: Store = Depends(store)):

@@ -1,6 +1,6 @@
 # Samby backend
 
-`app.main:app` is the integrated Samby API. It runs durable workspaces, guest/account access, enforced member roles, native Excel preview and asynchronous forecasting/simulation on local SQLite. PostgreSQL and Redis are not needed for this application.
+`app.main:app` is the integrated Samby API. It runs durable workspaces, guest/account access, enforced member roles, native Excel preview and asynchronous forecasting/simulation on PostgreSQL. The configured `DATABASE_URL` is the authoritative store; Redis is not required.
 
 ## Run locally
 
@@ -16,17 +16,13 @@ See [local service instructions](README-prototype.md) for credential handling, w
 
 ## State and recovery
 
-The default database is `app/prototype/data/samby.sqlite3`. `SAMBY_PROTOTYPE_DB` can select another database. Current business records and analytical resources are durable; browser storage is only a credential/cache/draft convenience. Submitted run inputs and completed artifacts remain immutable after current-data edits.
+Set `DATABASE_URL` to the Neon PostgreSQL URL. Hosted URLs using `postgres://`, `postgresql://`, `postgresql+asyncpg://`, or `postgresql+psycopg://` are normalized to the psycopg driver. On every startup the application runs `alembic upgrade head` before accepting traffic. Startup fails if Neon is unreachable or migrations fail; it never falls back to a local database.
 
-Create a consistent backup while the service is running:
+Current business records and analytical resources are durable in Neon; browser storage is only a credential/cache/draft convenience. Submitted run inputs and completed artifacts remain immutable after current-data edits. Use Neon branches, point-in-time restore, or a PostgreSQL-native dump for database backup and recovery.
 
-```sh
-.venv/bin/python -m app.prototype.backup --destination /absolute/path/samby-backup.sqlite3
-```
+Samby Guide conversations are also durable in Neon and scoped to the authorized workspace member or guest. The guide uses the configured OpenRouter model, retrieves page-relevant product behavior, and runs numerical workspace questions through deterministic metric tools. See [`docs/assistant-architecture.md`](docs/assistant-architecture.md) for the request flow, access boundary, and API routes.
 
-The backup command includes SQLite WAL contents and checks database integrity. It refuses to overwrite a file. A backup contains business records, password/session hashes and analytical histories; access to the file grants administrative control over the local data. To recover, stop the service and start it with `SAMBY_PROTOTYPE_DB` pointing to a verified backup or a retained copy. Keep the original database until recovery is verified.
-
-Records are retained indefinitely in this local version. Archive is reversible and does not delete snapshots, referenced results or current documents. No automatic retention purge or destructive per-record analytical deletion runs. Workspace JSON export is available through authenticated `GET /api/prototype/workspaces/{id}/export`; it includes the current document and revision, not account credentials or the full run history. The database backup preserves those histories.
+Records are retained indefinitely. Archive is reversible and does not delete snapshots, referenced results or current documents. No automatic retention purge or destructive per-record analytical deletion runs. Workspace JSON export is available through authenticated `GET /api/prototype/workspaces/{id}/export`; it includes the current document and revision, not account credentials or the full run history.
 
 Guest access requires its private key. Account sessions last 30 days and can be revoked by logout. Passwords use salted scrypt. Ten failed logins for an email/client pair within 15 minutes trigger a persistent temporary limit; errors do not disclose whether an email exists. Owners manage registered members without sending invitation messages. Account email delivery, external identity providers and external deployment are not configured.
 
@@ -44,7 +40,7 @@ This attaches retained history without changing saved inputs or results. No real
 .venv/bin/python -m pytest -q
 ```
 
-Tests cover arithmetic and training, async lifecycle, immutable history, cancellation/recovery, namespace access, role enforcement, revision conflicts, native XLSX/XLS parsing, export and backup.
+Tests cover arithmetic and training, async lifecycle, immutable history, cancellation/recovery, namespace access, role enforcement, revision conflicts, native XLSX/XLS parsing and export.
 
 ## Optional template services
 
