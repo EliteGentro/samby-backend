@@ -22,7 +22,7 @@ def test_asem_stress_toggle_shifts_collection_by_76_days_and_warns(workspace, co
     # The collection event should be shifted by 0 + 76 = 76 days
     collection_event = next(e for e in result['events'] if e['type'] == 'collection')
     assert collection_event['date'] == '2026-11-27'  # 2026-09-12 + 76 days
-    assert any('Estrés ASEM aplicado (+76 días)' in w for w in result['warnings'])
+    assert any('ASEM stress applied (+76 days)' in w for w in result['warnings'])
 
 
 def test_asem_stress_combines_with_empirical_p50_delay(workspace, config):
