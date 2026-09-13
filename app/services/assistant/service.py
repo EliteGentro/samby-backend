@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+import httpx
+
 from app.core.config import Settings
 from app.services.ai.models import AIOptions, ChatMessage
 from app.services.context_window import RollingContextWindow
@@ -106,11 +108,21 @@ class AssistantService:
             [system, *normalized], reserve_tokens=1400
         )
         raw_messages: list[dict] = [message.model_dump() for message in messages]
-        first = await self.provider.complete_chat(
-            raw_messages,
-            AIOptions(max_tokens=900, temperature=0.25),
-            tools=TOOLS,
-        )
+        try:
+            first = await self.provider.complete_chat(
+                raw_messages,
+                AIOptions(max_tokens=900, temperature=0.25),
+                tools=TOOLS,
+            )
+        except httpx.HTTPStatusError as error:
+            # Some OpenRouter models can answer from the deterministic context but
+            # do not expose tool calling. Keep the guide usable for those models.
+            if error.response.status_code not in {400, 404, 422}:
+                raise
+            first = await self.provider.complete_chat(
+                raw_messages,
+                AIOptions(max_tokens=900, temperature=0.25),
+            )
         tool_calls = first.get("tool_calls") or []
         if tool_calls:
             raw_messages.append({

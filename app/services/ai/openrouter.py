@@ -47,7 +47,7 @@ class OpenRouterProvider(AIProvider):
 
     async def complete_chat(
         self,
-        messages: list[dict],
+        messages: list[dict] | list[ChatMessage],
         options: AIOptions,
         tools: list[dict] | None = None,
     ) -> dict:
@@ -56,9 +56,13 @@ class OpenRouterProvider(AIProvider):
         Samby's workspace guide uses this non-streaming path so tool calls can be
         executed deterministically before the final answer is persisted.
         """
+        normalized_messages = [
+            message.model_dump() if isinstance(message, ChatMessage) else message
+            for message in messages
+        ]
         payload: dict = {
             "model": options.model or self.settings.openrouter_model,
-            "messages": messages,
+            "messages": normalized_messages,
             "max_tokens": options.max_tokens,
             "temperature": options.temperature,
             "stream": False,
