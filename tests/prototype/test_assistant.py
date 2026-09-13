@@ -18,6 +18,19 @@ class FakeGuide:
         ]
 
 
+class FakeSpeech:
+    def __init__(self, delegate):
+        self.received = ""
+        self.delegate = delegate
+
+    async def synthesize(self, content: str):
+        self.received = content
+        return b"fake-mp3"
+
+    async def close(self):
+        await self.delegate.close()
+
+
 def guest_headers(workspace: dict) -> dict:
     return {
         "X-Workspace-ID": workspace["id"],
@@ -51,6 +64,22 @@ def test_assistant_sessions_are_authorized_and_survive_app_restart(postgres_url,
         assert body["title"] == "What stock do I have?"
         assert [item["role"] for item in body["messages"]] == ["user", "assistant"]
         assert body["messages"][-1]["sources"][0]["id"] == "workspace-metrics"
+        speech = FakeSpeech(client.app.state.speech_service)
+        client.app.state.speech_service = speech
+        spoken = client.post(
+            f"{BASE}/workspaces/{workspace['id']}/assistant/sessions/{session_id}/messages/{body['messages'][-1]['id']}/speech",
+            headers=headers,
+        )
+        assert spoken.status_code == 200, spoken.text
+        assert spoken.content == b"fake-mp3"
+        assert spoken.headers["content-type"] == "audio/mpeg"
+        assert spoken.headers["cache-control"] == "private, no-store"
+        assert speech.received == "You have 10 recorded units on hand."
+        user_audio = client.post(
+            f"{BASE}/workspaces/{workspace['id']}/assistant/sessions/{session_id}/messages/{body['messages'][0]['id']}/speech",
+            headers=headers,
+        )
+        assert user_audio.status_code == 422
         assert client.get(
             f"{BASE}/workspaces/{workspace['id']}/assistant/sessions",
             headers={"X-Workspace-ID": workspace["id"]},

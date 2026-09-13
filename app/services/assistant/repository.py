@@ -59,6 +59,26 @@ class AssistantRepository:
         with self.store.connection() as db:
             return self._session(db, workspace_id, actor, session_id, True)
 
+    def get_message(
+        self, workspace_id: str, actor: str, session_id: str, message_id: str
+    ) -> dict:
+        with self.store.connection() as db:
+            row = db.execute(
+                """
+                SELECT message.*
+                FROM assistant_messages AS message
+                JOIN assistant_sessions AS session ON session.id=message.session_id
+                WHERE message.id=? AND message.session_id=?
+                  AND session.workspace_id=? AND session.actor=?
+                """,
+                (message_id, session_id, workspace_id, actor),
+            ).fetchone()
+            if row is None:
+                raise ResourceError(
+                    404, "Assistant message was not found in this conversation."
+                )
+            return self._message(row)
+
     def add_message(
         self,
         workspace_id: str,

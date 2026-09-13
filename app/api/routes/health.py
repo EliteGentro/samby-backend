@@ -31,7 +31,7 @@ async def live() -> HealthResponse:
 
 @router.get("/ready", response_model=HealthResponse, summary="Core dependency readiness")
 async def ready() -> HealthResponse:
-    # OpenRouter is intentionally checked by the separate health suite;
+    # The configured AI provider is intentionally checked by the separate health suite;
     # putting third-party APIs in a readiness probe can restart a healthy service.
     results = await asyncio.gather(_check_database(), _check_redis(), return_exceptions=True)
     if any(isinstance(result, Exception) for result in results):

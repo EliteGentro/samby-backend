@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
-from app.services.ai.openrouter import OpenRouterProvider
+from app.services.ai.factory import close_ai_provider, get_ai_provider
 
 pytestmark = pytest.mark.health
 
@@ -44,11 +44,12 @@ async def test_redis_connection() -> None:
         await redis.aclose()
 
 
-async def test_openrouter_authenticated_connection() -> None:
-    provider = OpenRouterProvider(get_settings())
+async def test_ai_provider_authenticated_connection() -> None:
+    settings = get_settings()
+    provider = get_ai_provider()
     try:
         await provider.health_check()
     except Exception as exc:
-        fail_safely("OpenRouter", exc)
+        fail_safely(settings.ai_provider, exc)
     finally:
-        await provider.close()
+        await close_ai_provider()

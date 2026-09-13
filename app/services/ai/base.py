@@ -1,11 +1,21 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from typing import Any
 
 from app.services.ai.models import AIChunk, AIOptions, ChatMessage
 
 
 class AIProvider(ABC):
     """Dependency-inversion boundary for every AI provider adapter."""
+
+    @abstractmethod
+    async def complete_chat(
+        self,
+        messages: list[dict[str, Any]] | list[ChatMessage],
+        options: AIOptions,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return a normalized OpenAI-compatible assistant message."""
 
     @abstractmethod
     async def stream_chat(

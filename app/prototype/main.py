@@ -17,8 +17,9 @@ from .platform import Platform
 from .platform_routes import namespace, router as platform_router
 from .assistant_routes import router as assistant_router
 from app.core.config import get_settings
-from app.services.ai.openrouter import OpenRouterProvider
+from app.services.ai.factory import close_ai_provider, get_ai_provider
 from app.services.assistant.service import AssistantService
+from app.services.speech import ElevenLabsSpeechService
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +65,10 @@ def create_app(database_url: str | None = None, start_worker: bool = True, poll_
         store = Store(database_url)
         application.state.store = store
         application.state.platform = Platform(store)
-        ai_provider = OpenRouterProvider(get_settings())
-        application.state.assistant_service = AssistantService(ai_provider, get_settings())
+        ai_provider = get_ai_provider()
+        settings = get_settings()
+        application.state.assistant_service = AssistantService(ai_provider, settings)
+        application.state.speech_service = ElevenLabsSpeechService(settings)
         worker_id = str(uuid4())
         await asyncio.to_thread(store.maintain)
         task = asyncio.create_task(worker_loop(store, worker_id, poll_seconds, timeout_seconds)) if start_worker else None
@@ -78,7 +81,8 @@ def create_app(database_url: str | None = None, start_worker: bool = True, poll_
                     await task
                 await asyncio.to_thread(store.release_worker, worker_id)
             await asyncio.to_thread(store.close)
-            await ai_provider.close()
+            await application.state.speech_service.close()
+            await close_ai_provider()
 
     application = FastAPI(title='Samby local analytical prototype', version='0.4.0', lifespan=lifespan)
     application.add_middleware(CORSMiddleware, allow_origins=[f'http://{host}:{port}' for host in ('localhost', '127.0.0.1') for port in (4173, 5173)], allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-Workspace-ID', 'X-Workspace-Key', 'Authorization'], allow_credentials=False)

@@ -1,19 +1,36 @@
 from app.core.config import get_settings
 from app.services.ai.base import AIProvider
+from app.services.ai.fallback import FallbackAIProvider
+from app.services.ai.gemini import GeminiProvider
 from app.services.ai.openrouter import OpenRouterProvider
 
 _provider: AIProvider | None = None
 
 
+def _build_provider(name: str, settings) -> AIProvider:
+    if name == "openrouter":
+        return OpenRouterProvider(settings)
+    if name == "gemini":
+        return GeminiProvider(settings)
+    raise ValueError(f"Unsupported AI provider: {name}")
+
+
 def get_ai_provider() -> AIProvider:
-    """Composition root: this is the only place that chooses a concrete provider."""
+    """Build the configured primary provider and optional 403 fallback."""
     global _provider
     if _provider is None:
         settings = get_settings()
-        if settings.ai_provider == "openrouter":
-            _provider = OpenRouterProvider(settings)
+        primary = _build_provider(settings.ai_provider, settings)
+        fallback_name = settings.ai_provider_fallback
+        if fallback_name and fallback_name != settings.ai_provider:
+            _provider = FallbackAIProvider(
+                primary,
+                _build_provider(fallback_name, settings),
+                settings.ai_provider,
+                fallback_name,
+            )
         else:
-            raise ValueError(f"Unsupported AI_PROVIDER: {settings.ai_provider}")
+            _provider = primary
     return _provider
 
 
