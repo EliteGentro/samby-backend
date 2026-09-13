@@ -170,7 +170,7 @@ def finance_inputs(config: dict, workspace: dict, families: set[str]) -> dict:
     delay = int(assumptions.get('collection_delay_days') or 0)
     if assumptions.get('asem_stress'):
         delay += 76
-        warnings.append('Estrés ASEM aplicado (+76 días): Se adicionaron 76 días de retraso empírico oficial de PyMEs a las proyecciones de cobro.')
+        warnings.append('ASEM stress applied (+76 days): Added 76 days of official SME empirical delay to collection projections.')
     question = config['question']
     has_collection_assumption = assumptions.get('collection_delay_days') is not None or bool(assumptions.get('asem_stress'))
     change_all_collections = not selected_collection and has_collection_assumption and question in {'Q-CUSTOMER-DEBT', 'Q-CASH-SUFFICIENCY', 'Q-EXPLORE'}
