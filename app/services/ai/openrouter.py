@@ -45,6 +45,40 @@ class OpenRouterProvider(AIProvider):
             }
         return payload
 
+    async def complete_chat(
+        self,
+        messages: list[dict] | list[ChatMessage],
+        options: AIOptions,
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """Return one complete OpenRouter message, including optional tool calls."""
+        normalized_messages = [
+            message.model_dump() if isinstance(message, ChatMessage) else message
+            for message in messages
+        ]
+        payload: dict = {
+            "model": options.model or self.settings.openrouter_model,
+            "messages": normalized_messages,
+            "max_tokens": options.max_tokens,
+            "temperature": options.temperature,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        response = await self.client.post(
+            f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+            headers=self.headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        body = response.json()
+        choices = body.get("choices") or []
+        message = choices[0].get("message") if choices else None
+        if not isinstance(message, dict):
+            raise RuntimeError("OpenRouter returned no assistant message")
+        return message
+
     async def stream_chat(
         self, messages: list[ChatMessage], options: AIOptions
     ) -> AsyncIterator[AIChunk]:

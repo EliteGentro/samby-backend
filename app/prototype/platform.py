@@ -83,6 +83,22 @@ class Platform:
                 CREATE TABLE IF NOT EXISTS platform_login_failures (
                     identity TEXT PRIMARY KEY, failures INTEGER NOT NULL, window_start TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS assistant_sessions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES platform_workspaces(id) ON DELETE CASCADE,
+                    actor TEXT NOT NULL, title TEXT NOT NULL, page TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS assistant_session_owner
+                    ON assistant_sessions(workspace_id, actor, updated_at);
+                CREATE TABLE IF NOT EXISTS assistant_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES assistant_sessions(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL, content TEXT NOT NULL, page TEXT NOT NULL,
+                    sources TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS assistant_message_session
+                    ON assistant_messages(session_id, created_at);
             ''')
 
     def _session(self, db, user: dict) -> dict:
@@ -213,6 +229,7 @@ class Platform:
             if not row or not guest_key or not row['guest_key_hash'] or not hmac.compare_digest(digest(guest_key), row['guest_key_hash']):
                 raise ResourceError(404, 'The guest credential cannot claim this workspace.')
             db.execute('INSERT INTO platform_memberships VALUES(?,?,?)', (workspace_id, user['id'], 'owner'))
+            db.execute('UPDATE assistant_sessions SET actor=? WHERE workspace_id=? AND actor=?', (user['id'], workspace_id, f'guest:{workspace_id}'))
             db.execute('UPDATE platform_workspaces SET guest_key_hash=NULL,updated_at=? WHERE id=?', (now(), workspace_id))
             self._audit(db, workspace_id, user['id'], 'workspace.claim')
         return self.get_workspace({'workspace_id': workspace_id, 'role': 'owner'})

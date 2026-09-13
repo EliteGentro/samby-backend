@@ -11,7 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from app.core.config import get_settings
+from app.services.ai.openrouter import OpenRouterProvider
+from app.services.assistant.service import AssistantService
 from .engine import execute
+from .assistant_routes import router as assistant_router
 from .schema import DefinitionCreate, DefinitionPatch, InputError, RunCreate
 from .store import ResourceError, Store
 from .platform import Platform
@@ -61,6 +65,9 @@ def create_app(database_path: str | Path | None = None, start_worker: bool = Tru
         store = Store(path)
         application.state.store = store
         application.state.platform = Platform(store)
+        settings = get_settings()
+        provider = OpenRouterProvider(settings)
+        application.state.assistant_service = AssistantService(provider, settings.ai_context_max_tokens)
         worker_id = str(uuid4())
         await asyncio.to_thread(store.maintain)
         task = asyncio.create_task(worker_loop(store, worker_id, poll_seconds, timeout_seconds)) if start_worker else None
@@ -72,10 +79,12 @@ def create_app(database_path: str | Path | None = None, start_worker: bool = Tru
                 with suppress(asyncio.CancelledError):
                     await task
                 await asyncio.to_thread(store.release_worker, worker_id)
+            await provider.close()
 
     application = FastAPI(title='Samby local analytical prototype', version='0.4.0', lifespan=lifespan)
     application.add_middleware(CORSMiddleware, allow_origins=[f'http://{host}:{port}' for host in ('localhost', '127.0.0.1') for port in (4173, 5173)], allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-Workspace-ID', 'X-Workspace-Key', 'Authorization'], allow_credentials=False)
     application.include_router(platform_router)
+    application.include_router(assistant_router)
 
     @application.exception_handler(ResourceError)
     async def resource_error(_request: Request, error: ResourceError):
