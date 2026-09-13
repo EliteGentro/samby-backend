@@ -2,10 +2,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from pathlib import Path
-import sqlite3
 from uuid import uuid4
 
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+
+from app.core.config import get_settings
 from .engine import VERSION, prepare, scope
 from .schema import InputError, validate_workspace
 
@@ -28,88 +30,47 @@ def dump(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+class Database:
+    """Small compatibility adapter while repository SQL uses positional placeholders."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, statement: str, parameters=()):
+        return self._connection.execute(statement.replace('?', '%s'), parameters)
+
+
+def psycopg_url(database_url: str) -> str:
+    return database_url.replace('postgresql+psycopg://', 'postgresql://', 1)
+
+
 class Store:
-    def __init__(self, path: str | Path):
-        self.path = str(path)
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as db:
-            db.execute('PRAGMA journal_mode=WAL')
-            db.executescript('''
-                CREATE TABLE IF NOT EXISTS namespaces (
-                    id TEXT PRIMARY KEY, mode TEXT
-                );
-                CREATE TABLE IF NOT EXISTS definitions (
-                    id TEXT PRIMARY KEY, namespace TEXT NOT NULL,
-                    name TEXT NOT NULL, kind TEXT NOT NULL, config TEXT NOT NULL,
-                    version INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS definition_namespace ON definitions(namespace, kind, archived);
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    id TEXT PRIMARY KEY, namespace TEXT NOT NULL, definition_version INTEGER NOT NULL,
-                    config TEXT NOT NULL, workspace TEXT NOT NULL, hash TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS runs (
-                    id TEXT PRIMARY KEY, namespace TEXT NOT NULL, definition_id TEXT NOT NULL,
-                    definition_name TEXT NOT NULL, kind TEXT NOT NULL, snapshot_id TEXT NOT NULL,
-                    status TEXT NOT NULL, phase TEXT, created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
-                    warnings TEXT NOT NULL, error TEXT, retry_of_run_id TEXT,
-                    attempt INTEGER NOT NULL DEFAULT 0, provenance TEXT NOT NULL,
-                    worker_id TEXT, lease_until TEXT, archived INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
-                );
-                CREATE INDEX IF NOT EXISTS run_namespace ON runs(namespace, kind, status, archived);
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    namespace TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL,
-                    run_id TEXT NOT NULL, PRIMARY KEY(namespace, key)
-                );
-                CREATE TABLE IF NOT EXISTS artifacts (
-                    run_id TEXT PRIMARY KEY, result TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                CREATE TABLE IF NOT EXISTS transitions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
-                    previous_status TEXT, status TEXT NOT NULL, at TEXT NOT NULL, detail TEXT
-                );
-                CREATE TRIGGER IF NOT EXISTS immutable_snapshot_update BEFORE UPDATE ON snapshots
-                    BEGIN SELECT RAISE(ABORT, 'Submitted snapshots are immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS immutable_snapshot_delete BEFORE DELETE ON snapshots
-                    BEGIN SELECT RAISE(ABORT, 'Submitted snapshots are retained'); END;
-                CREATE TRIGGER IF NOT EXISTS immutable_artifact_update BEFORE UPDATE ON artifacts
-                    BEGIN SELECT RAISE(ABORT, 'Completed artifacts are immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS immutable_artifact_delete BEFORE DELETE ON artifacts
-                    BEGIN SELECT RAISE(ABORT, 'Completed artifacts are retained'); END;
-                CREATE TRIGGER IF NOT EXISTS immutable_run_inputs
-                    BEFORE UPDATE OF snapshot_id, namespace, definition_id, definition_name, kind,
-                        created_at, retry_of_run_id, provenance ON runs
-                    BEGIN SELECT RAISE(ABORT, 'Submitted run identity and inputs are immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS terminal_run_status BEFORE UPDATE OF status ON runs
-                    WHEN OLD.status IN ('succeeded', 'failed', 'cancelled')
-                    BEGIN SELECT RAISE(ABORT, 'Terminal run state is immutable'); END;
-            ''')
+    def __init__(self, database_url: str | None = None):
+        settings = get_settings()
+        self.database_url = database_url or settings.database_url
+        self.pool = ConnectionPool(
+            conninfo=psycopg_url(self.database_url),
+            min_size=0,
+            max_size=settings.database_pool_max_connections,
+            timeout=settings.database_connect_timeout_seconds,
+            kwargs={"row_factory": dict_row, "prepare_threshold": None},
+            open=True,
+        )
+
+    def close(self) -> None:
+        self.pool.close()
 
     @contextmanager
     def connection(self):
-        db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA foreign_keys=ON')
-        db.execute('PRAGMA busy_timeout=10000')
-        try:
-            yield db
-        finally:
-            db.close()
+        with self.pool.connection() as connection:
+            yield Database(connection)
 
     @contextmanager
     def transaction(self):
-        with self.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            try:
+        with self.pool.connection() as connection:
+            with connection.transaction():
+                db = Database(connection)
                 yield db
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
 
     def _definition(self, db, namespace: str, definition_id: str) -> dict:
         row = db.execute('SELECT * FROM definitions WHERE id=? AND namespace=?', (definition_id, namespace)).fetchone()
@@ -120,7 +81,7 @@ class Store:
     def create_definition(self, namespace: str, body: dict) -> dict:
         definition_id, timestamp = str(uuid4()), now()
         with self.transaction() as db:
-            db.execute('INSERT OR IGNORE INTO namespaces(id) VALUES(?)', (namespace,))
+            db.execute('INSERT INTO namespaces(id) VALUES(?) ON CONFLICT(id) DO NOTHING', (namespace,))
             db.execute('INSERT INTO definitions(id,namespace,name,kind,config,version,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)', (definition_id, namespace, body['name'], body['kind'], dump(body['config']), timestamp, timestamp))
             return self._definition(db, namespace, definition_id)
 
@@ -166,6 +127,7 @@ class Store:
     def submit(self, namespace: str, definition_id: str, body: dict) -> dict:
         fingerprint = hashlib.sha256(dump({'definition_id': definition_id, 'snapshot': body['snapshot'], 'retry_of_run_id': body.get('retry_of_run_id')}).encode()).hexdigest()
         with self.transaction() as db:
+            db.execute('SELECT id FROM namespaces WHERE id=? FOR UPDATE', (namespace,)).fetchone()
             prior = db.execute('SELECT fingerprint,run_id FROM idempotency WHERE namespace=? AND key=?', (namespace, body['idempotency_key'])).fetchone()
             if prior:
                 if prior['fingerprint'] != fingerprint:
@@ -236,6 +198,7 @@ class Store:
 
     def cancel(self, namespace: str, run_id: str) -> dict:
         with self.transaction() as db:
+            db.execute('SELECT id FROM runs WHERE id=? AND namespace=? FOR UPDATE', (run_id, namespace)).fetchone()
             current = self._run(db, namespace, run_id)
             if current['status'] not in TERMINAL:
                 self._transition(db, run_id, current['status'], 'cancelled', 'Cancelled by the owner')
@@ -243,17 +206,18 @@ class Store:
 
     def archive(self, namespace: str, run_id: str, archived: bool) -> dict:
         with self.transaction() as db:
+            db.execute('SELECT id FROM runs WHERE id=? AND namespace=? FOR UPDATE', (run_id, namespace)).fetchone()
             self._run(db, namespace, run_id)
             db.execute('UPDATE runs SET archived=? WHERE id=?', (int(archived), run_id))
             return self._run(db, namespace, run_id)
 
     def maintain(self, max_attempts: int = 3) -> None:
         with self.transaction() as db:
-            rows = db.execute("SELECT id,status,attempt FROM runs WHERE status='running' AND lease_until<?", (now(),)).fetchall()
+            rows = db.execute("SELECT id,status,attempt FROM runs WHERE status='running' AND lease_until<? FOR UPDATE SKIP LOCKED", (now(),)).fetchall()
             for row in rows:
                 failed = row['attempt'] >= max_attempts
                 self._transition(db, row['id'], 'running', 'failed' if failed else 'queued', 'Worker recovery exhausted' if failed else 'Recovered unchanged inputs after an expired worker lease', 'The worker stopped repeatedly. Retry this run after checking the local service.' if failed else None)
-            waiting = db.execute("SELECT r.id,r.namespace,s.config FROM runs r JOIN snapshots s ON r.snapshot_id=s.id WHERE r.status='waiting_for_dependency'").fetchall()
+            waiting = db.execute("SELECT r.id,r.namespace,s.config FROM runs r JOIN snapshots s ON r.snapshot_id=s.id WHERE r.status='waiting_for_dependency' FOR UPDATE OF r SKIP LOCKED").fetchall()
             for row in waiting:
                 dependency = self._run(db, row['namespace'], json.loads(row['config'])['forecast_run_id'])
                 if dependency['status'] == 'succeeded':
@@ -263,7 +227,7 @@ class Store:
 
     def claim(self, worker_id: str, lease_seconds: float = 30) -> tuple[str, dict] | None:
         with self.transaction() as db:
-            row = db.execute("SELECT id,namespace FROM runs WHERE status='queued' ORDER BY created_at,id LIMIT 1").fetchone()
+            row = db.execute("SELECT id,namespace FROM runs WHERE status='queued' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED").fetchone()
             if row is None:
                 return None
             self._transition(db, row['id'], 'queued', 'running', 'Computing saved inputs')
@@ -272,7 +236,7 @@ class Store:
 
     def finish(self, namespace: str, run_id: str, worker_id: str, result: dict | None = None, error: str | None = None) -> dict:
         with self.transaction() as db:
-            current = db.execute('SELECT status,worker_id FROM runs WHERE id=? AND namespace=?', (run_id, namespace)).fetchone()
+            current = db.execute('SELECT status,worker_id FROM runs WHERE id=? AND namespace=? FOR UPDATE', (run_id, namespace)).fetchone()
             if current is None:
                 raise ResourceError(404, 'Run was not found in this workspace.')
             if current['status'] == 'running' and current['worker_id'] == worker_id:

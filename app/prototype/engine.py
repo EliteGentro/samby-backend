@@ -6,6 +6,9 @@ from typing import Any
 from .inventory_policy import policy_order, validate_policy
 from .forecasting import ADVANCED_ENGINES, build_forecast, validate_advanced
 from .scenario_finance import apply_scenario_finance, selected_terms, validate_financial_assumptions
+from .poison_apple import simulate_poison_apple, validate_poison_apple
+from .dead_stock_liberator import scan_dead_stock, simulate_liquidation
+from .treasury_edge_cases import payroll_cliff, weekend_cutoff, supplier_credit_spiral, payment_dispute_hold, validate_treasury_stress
 from .schema import CATEGORIES, InputError, dates, day, numeric, validate_workspace
 
 
@@ -20,6 +23,9 @@ ASSETS = {
     'Q-CUSTOMER-DEBT': ['customer_node', 'invoice', 'receivable_balance', 'cash_account', 'cash_inflow', 'calendar_marker'],
     'Q-SUPPLIER-ORDER-STOCKOUT': ['supplier_node', 'purchase_order', 'delivery_truck', 'warehouse', 'sku_stack', 'stockout_marker', 'calendar_marker'],
     'Q-EXPLORE': [],
+    'Q-POISON-APPLE': ['customer_order', 'supplier_node', 'cash_account', 'cash_inflow', 'cash_outflow', 'calendar_marker'],
+    'Q-DEAD-STOCK': ['warehouse', 'sku_stack', 'cash_account', 'cash_inflow', 'calendar_marker'],
+    'Q-TREASURY-STRESS': ['cash_account', 'payroll_group', 'supplier_payable', 'supplier_node', 'cash_inflow', 'cash_outflow', 'stockout_marker', 'calendar_marker'],
 }
 ASSET_MEANINGS = {
     'warehouse': 'Known inventory location or declared aggregate scope.',
@@ -162,11 +168,15 @@ def finance_inputs(config: dict, workspace: dict, families: set[str]) -> dict:
         warnings.append('Financial results use the supplied business-wide financial records. The selected product/location filters apply only to inventory and demand because financial records have no location allocation.')
     selected_collection = assumptions.get('collection_id')
     delay = int(assumptions.get('collection_delay_days') or 0)
+    if assumptions.get('asem_stress'):
+        delay += 76
+        warnings.append('Estrés ASEM aplicado (+76 días): Se adicionaron 76 días de retraso empírico oficial de PyMEs a las proyecciones de cobro.')
     question = config['question']
-    change_all_collections = not selected_collection and assumptions.get('collection_delay_days') is not None and question in {'Q-CUSTOMER-DEBT', 'Q-CASH-SUFFICIENCY', 'Q-EXPLORE'}
-    if question == 'Q-CRITICAL-COLLECTION' and (not selected_collection or assumptions.get('collection_delay_days') is None):
+    has_collection_assumption = assumptions.get('collection_delay_days') is not None or bool(assumptions.get('asem_stress'))
+    change_all_collections = not selected_collection and has_collection_assumption and question in {'Q-CUSTOMER-DEBT', 'Q-CASH-SUFFICIENCY', 'Q-EXPLORE'}
+    if question == 'Q-CRITICAL-COLLECTION' and (not selected_collection or not has_collection_assumption):
         raise InputError('Select a collection and enter its changed collection delay in calendar days.')
-    if question == 'Q-CUSTOMER-DEBT' and assumptions.get('collection_delay_days') is None:
+    if question == 'Q-CUSTOMER-DEBT' and not has_collection_assumption:
         raise InputError('Enter the explicit customer collection-delay assumption.')
     if selected_collection and selected_collection not in records:
         raise InputError('The selected collection is missing from the submitted snapshot.')
@@ -622,6 +632,14 @@ def prepare(kind: str, config: dict, workspace: dict, dependency: dict | None = 
     if kind == 'forecast':
         values, warnings = forecast_values(config, workspace)
         return {'forecast': values, 'warnings': warnings}
+    if config['question'] == 'Q-POISON-APPLE':
+        validate_poison_apple(config)
+        return {'warnings': ['Poison Apple scenario models a single large order with upfront supplier payments and delayed customer collection.']}
+    if config['question'] == 'Q-DEAD-STOCK':
+        scan_result = scan_dead_stock(workspace, config)
+        return {'dead_stock': scan_result, 'warnings': scan_result['warnings'][:]}
+    if config['question'] == 'Q-TREASURY-STRESS':
+        validate_treasury_stress(config)
     families = set(config.get('output_families') or [])
     if not families:
         raise InputError('Select at least one supported result family.')
@@ -632,6 +650,8 @@ def prepare(kind: str, config: dict, workspace: dict, dependency: dict | None = 
         raise InputError('This focused question requires cash results. Customer-debt exploration can show timing without opening cash.')
     if config['question'] == 'Q-CUSTOMER-DEBT' and not families.intersection({'cash', 'debt'}):
         raise InputError('Customer-debt analysis requires the debt or cash family.')
+    if config['question'] == 'Q-TREASURY-STRESS' and 'cash' not in families:
+        raise InputError('Treasury stress scenarios require cash results.')
     validate_financial_assumptions(config)
     prepared: dict[str, Any] = {'warnings': []}
     if config['question'] == 'Q-EXPLORE' and config['assumptions'].get('order_quantity') is None and any(config['assumptions'].get(k) is not None for k in ('order_date', 'receipt_date', 'lead_time_days')):
@@ -690,6 +710,20 @@ def execute(kind: str, config: dict, workspace: dict, run_id: str, dependency: d
             point['demand'] = value
         metrics.append(metric('forecast_demand', 'Forecast demand across the selected daily window', sum(Decimal(str(v)) for v in prepared['forecast']), unit))
         explanations.append(f'The saved {config["engine"]} daily forecast covers {timeline[0]} through {timeline[-1]}.')
+    if config['question'] == 'Q-POISON-APPLE':
+        result = simulate_poison_apple(config, workspace)
+        warnings = list(dict.fromkeys(prepared['warnings'] + result['warnings']))
+        final_result = {'start_date': timeline[0], 'end_date': timeline[-1], 'grain': 'daily', 'metrics': result['metrics'], 'series': result['series'], 'events': result['events'], 'assumptions': [f'{key}: {value}' for key, value in config['assumptions'].items() if value is not None], 'warnings': warnings, 'explanations': result['explanations'], 'comparison': None, 'scene_manifest': None, 'series_metadata': {'run_id': run_id, 'calculation_version': VERSION, 'currency': currency, 'timezone': workspace['profile']['timezone'], 'scope': scope(config, workspace)}}
+        final_result['scene_manifest'] = scene_manifest(final_result, config, run_id, kind)
+        return final_result
+    if config['question'] == 'Q-DEAD-STOCK':
+        scan_result = prepared['dead_stock']
+        candidates = scan_result['candidates']
+        liq_result = simulate_liquidation(workspace, candidates, config)
+        warnings = list(dict.fromkeys(prepared['warnings'] + liq_result['warnings']))
+        final_result = {'start_date': timeline[0], 'end_date': timeline[-1], 'grain': 'daily', 'metrics': liq_result['metrics'], 'series': liq_result['series'], 'events': liq_result['events'], 'assumptions': [f'{key}: {value}' for key, value in config['assumptions'].items() if value is not None], 'warnings': warnings, 'explanations': liq_result['explanations'], 'candidates': liq_result['candidates'], 'comparison': None, 'scene_manifest': None, 'series_metadata': {'run_id': run_id, 'calculation_version': VERSION, 'currency': currency, 'timezone': workspace['profile']['timezone'], 'scope': scope(config, workspace)}}
+        final_result['scene_manifest'] = scene_manifest(final_result, config, run_id, kind)
+        return final_result
     if 'inventory' in prepared:
         inventory = prepared['inventory']
         stock = inventory['opening_stock']
@@ -907,6 +941,34 @@ def execute(kind: str, config: dict, workspace: dict, run_id: str, dependency: d
         explanations.append(f'Purchasing budget uses gross order commitments dated {period}. Paid amounts do not reduce committed purchasing spend. Budget is separate from available cash.')
         if budget['partial']:
             prepared['warnings'].append('Partial purchasing-budget comparison. Unpriced or undated purchases prevent a complete spend, headroom or breach result. Known priced commitments remain visible.')
+    if config['question'] == 'Q-TREASURY-STRESS':
+        assumptions = config.get('assumptions', {})
+        if assumptions.get('payroll_amount') or assumptions.get('payroll_dates'):
+            payroll_result = payroll_cliff(series, config, workspace)
+            series = payroll_result['series']
+            metrics.extend(payroll_result['metrics'])
+            events.extend(payroll_result['events'])
+            prepared['warnings'].extend(payroll_result['warnings'])
+            explanations.append('Payroll cliff analysis applied: an untouchable payroll reserve is subtracted from available cash.')
+        if assumptions.get('banking_cutoff_apply') or assumptions.get('weekend_shift_apply'):
+            weekend_result = weekend_cutoff(series, config, workspace)
+            series = weekend_result['series']
+            metrics.extend(weekend_result['metrics'])
+            prepared['warnings'].extend(weekend_result['warnings'])
+            explanations.append('Banking cutoff and weekend shift applied: SPEI/ACH inflows landing on weekends are shifted to Monday.')
+        if assumptions.get('paused_supplier_ids'):
+            spiral_result = supplier_credit_spiral(series, config, workspace)
+            series = spiral_result['series']
+            metrics.extend(spiral_result['metrics'])
+            events.extend(spiral_result['events'])
+            prepared['warnings'].extend(spiral_result['warnings'])
+            explanations.append('Supplier credit spiral modeled: paused payments trigger delivery freezes, stockouts, and revenue loss.')
+        if assumptions.get('disputed_record_ids'):
+            dispute_result = payment_dispute_hold(series, config, workspace)
+            series = dispute_result['series']
+            metrics.extend(dispute_result['metrics'])
+            prepared['warnings'].extend(dispute_result['warnings'])
+            explanations.append('Payment dispute hold applied: disputed receivables are frozen and partially recovered after resolution.')
     warnings = list(dict.fromkeys(prepared['warnings']))
     result = {'start_date': timeline[0], 'end_date': timeline[-1], 'grain': 'daily', 'metrics': metrics, 'series': series, 'events': sorted(events, key=lambda event: (event['date'], event['id'])), 'assumptions': [f'{key}: {value}' for key, value in config['assumptions'].items() if value is not None], 'warnings': warnings, 'explanations': explanations, 'comparison': None, 'scene_manifest': None, 'series_metadata': {'run_id': run_id, 'calculation_version': VERSION, 'currency': currency, 'timezone': workspace['profile']['timezone'], 'scope': scope(config, workspace), 'observations': {'inventory': 'closing', 'cash': 'closing', 'receivable': 'closing', 'provider_pending': 'closing', 'payable': 'closing confirmed supplier balance', 'financing_debt': 'closing recorded financing balance', 'customer_concentration': 'largest share of closing supplied customer balance, percent', 'demand': 'flow', 'inflow': 'flow', 'outflow': 'flow', 'purchase': 'receipt flow', 'unmet_demand': 'new demand not immediately fulfilled', 'fulfilled': 'new demand fulfilled on request date', 'backorders': 'closing carried backlog', 'backlog_fulfilled': 'prior backlog fulfillment flow', 'lost_units': 'new lost-demand flow', 'on_hand': 'closing physical quantity including remaining reservations', 'inventory_position': 'closing available plus future confirmed receipts minus backlog'}}}
     result['series_metadata']['quantity_unit'] = get_product(config, workspace)['unit'] if kind == 'forecast' or 'inventory' in prepared else None

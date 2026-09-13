@@ -51,7 +51,11 @@ class OpenRouterProvider(AIProvider):
         options: AIOptions,
         tools: list[dict] | None = None,
     ) -> dict:
-        """Return one complete OpenRouter message, including optional tool calls."""
+        """Return one OpenAI-compatible assistant message.
+
+        Samby's workspace guide uses this non-streaming path so tool calls can be
+        executed deterministically before the final answer is persisted.
+        """
         normalized_messages = [
             message.model_dump() if isinstance(message, ChatMessage) else message
             for message in messages
@@ -74,10 +78,9 @@ class OpenRouterProvider(AIProvider):
         response.raise_for_status()
         body = response.json()
         choices = body.get("choices") or []
-        message = choices[0].get("message") if choices else None
-        if not isinstance(message, dict):
+        if not choices or not isinstance(choices[0].get("message"), dict):
             raise RuntimeError("OpenRouter returned no assistant message")
-        return message
+        return choices[0]["message"]
 
     async def stream_chat(
         self, messages: list[ChatMessage], options: AIOptions

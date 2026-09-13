@@ -1,12 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-import sqlite3
 import secrets
 import time
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
+from psycopg import Error as PostgresError
 
 from app.prototype.engine import execute
 from app.prototype.main import create_app
@@ -33,8 +33,8 @@ def complete_next(store):
     return store.finish(namespace, run['id'], 'test-worker', result)
 
 
-def test_identical_concurrent_submissions_return_one_durable_run(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_identical_concurrent_submissions_return_one_durable_run(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     saved = definition(store, workspace, config)
     with ThreadPoolExecutor(max_workers=5) as pool:
@@ -49,8 +49,8 @@ def test_identical_concurrent_submissions_return_one_durable_run(tmp_path, works
     assert complete_next(store)['result']['series'][-1]['cash'] == 90
 
 
-def test_snapshot_and_prior_results_survive_definition_edits_and_restart(tmp_path, workspace, config):
-    path = tmp_path / 'state.sqlite3'
+def test_snapshot_and_prior_results_survive_definition_edits_and_restart(postgres_url, workspace, config):
+    path = postgres_url
     store = Store(path)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     saved = definition(store, workspace, config)
@@ -73,24 +73,26 @@ def test_snapshot_and_prior_results_survive_definition_edits_and_restart(tmp_pat
     assert rerun['snapshot']['cash']['amount'] == 900
 
 
-def test_database_guards_keep_snapshots_and_artifacts_immutable(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_database_guards_keep_snapshots_and_artifacts_immutable(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     run = submit(store, workspace, definition(store, workspace, config))
     complete_next(store)
-    with store.connection() as db:
-        with pytest.raises(sqlite3.IntegrityError, match='snapshots are immutable'):
+    with pytest.raises(PostgresError, match='snapshots are immutable'):
+        with store.connection() as db:
             db.execute("UPDATE snapshots SET workspace='{}'")
-        with pytest.raises(sqlite3.IntegrityError, match='artifacts are immutable'):
+    with pytest.raises(PostgresError, match='artifacts are immutable'):
+        with store.connection() as db:
             db.execute("UPDATE artifacts SET result='{}'")
-        with pytest.raises(sqlite3.IntegrityError, match='Terminal run state'):
+    with pytest.raises(PostgresError, match='Terminal run state'):
+        with store.connection() as db:
             db.execute("UPDATE runs SET status='queued' WHERE id=?", (run['id'],))
     assert store.cancel(workspace['id'], run['id'])['status'] == 'succeeded'
     assert store.get_run(workspace['id'], run['id'])['result']['series'][-1]['cash'] == 90
 
 
-def test_archive_is_retrievable_and_does_not_cancel_work(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_archive_is_retrievable_and_does_not_cancel_work(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     run = submit(store, workspace, definition(store, workspace, config))
     assert store.archive(workspace['id'], run['id'], True)['status'] == 'queued'
@@ -101,8 +103,8 @@ def test_archive_is_retrievable_and_does_not_cancel_work(tmp_path, workspace, co
     assert store.archive(workspace['id'], run['id'], False)['archived'] is False
 
 
-def test_forecast_dependency_waits_then_uses_pinned_daily_values(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_forecast_dependency_waits_then_uses_pinned_daily_values(postgres_url, workspace, config):
+    store = Store(postgres_url)
     forecast_config = {**config, 'product_id': 'p1', 'output_families': []}
     forecast_definition = definition(store, workspace, forecast_config, 'forecast')
     forecast = submit(store, workspace, forecast_definition, 'forecast')
@@ -123,8 +125,8 @@ def test_forecast_dependency_waits_then_uses_pinned_daily_values(tmp_path, works
 
 
 @pytest.mark.parametrize('dependency_status', ['failed', 'cancelled'])
-def test_dependency_failure_is_persistent_without_fake_results(tmp_path, workspace, config, dependency_status):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_dependency_failure_is_persistent_without_fake_results(postgres_url, workspace, config, dependency_status):
+    store = Store(postgres_url)
     forecast = submit(store, workspace, definition(store, workspace, {**config, 'product_id': 'p1'}, 'forecast'), 'forecast')
     cfg = inventory_config(config)
     cfg['forecast_run_id'] = forecast['id']
@@ -135,14 +137,14 @@ def test_dependency_failure_is_persistent_without_fake_results(tmp_path, workspa
         store.claim('failed-worker')
         store.finish(workspace['id'], forecast['id'], 'failed-worker', error='Test worker failed while computing saved inputs.')
     store.maintain()
-    result = Store(tmp_path / 'state.sqlite3').get_run(workspace['id'], simulation['id'])
+    result = Store(postgres_url).get_run(workspace['id'], simulation['id'])
     assert result['status'] == 'failed'
     assert dependency_status in result['error']
     assert result['result'] is None
 
 
-def test_cancel_wins_against_late_worker_finalization(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_cancel_wins_against_late_worker_finalization(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     run = submit(store, workspace, definition(store, workspace, config))
     store.claim('worker1')
@@ -152,17 +154,17 @@ def test_cancel_wins_against_late_worker_finalization(tmp_path, workspace, confi
     assert late['status'] == 'cancelled'
     assert late['result'] is None
     with store.connection() as db:
-        assert db.execute('SELECT COUNT(*) FROM artifacts').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) AS count FROM artifacts').fetchone()['count'] == 0
 
 
-def test_expired_worker_recovers_same_inputs_and_records_attempts(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_expired_worker_recovers_same_inputs_and_records_attempts(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     run = submit(store, workspace, definition(store, workspace, config))
     store.claim('lost-worker')
     with store.transaction() as db:
         db.execute("UPDATE runs SET lease_until='1970-01-01T00:00:00+00:00' WHERE id=?", (run['id'],))
-    store = Store(tmp_path / 'state.sqlite3')
+    store = Store(postgres_url)
     store.maintain()
     assert store.get_run(workspace['id'], run['id'])['status'] == 'queued'
     completed = complete_next(store)
@@ -173,8 +175,8 @@ def test_expired_worker_recovers_same_inputs_and_records_attempts(tmp_path, work
     assert [t['status'] for t in store.transitions(workspace['id'], run['id'])] == ['queued', 'running', 'queued', 'running', 'succeeded']
 
 
-def test_repeated_worker_loss_becomes_actionable_failure(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_repeated_worker_loss_becomes_actionable_failure(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     run = submit(store, workspace, definition(store, workspace, config))
     for index in range(3):
@@ -189,8 +191,8 @@ def test_repeated_worker_loss_becomes_actionable_failure(tmp_path, workspace, co
     assert failed['result'] is None
 
 
-def test_namespace_and_mode_isolation(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_namespace_and_mode_isolation(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     saved = definition(store, workspace, config)
     run = submit(store, workspace, saved)
@@ -211,8 +213,8 @@ def test_namespace_and_mode_isolation(tmp_path, workspace, config):
     assert second['id'] != run['id']
 
 
-def test_comparison_pins_completed_baseline_after_newer_runs(tmp_path, workspace, config):
-    store = Store(tmp_path / 'state.sqlite3')
+def test_comparison_pins_completed_baseline_after_newer_runs(postgres_url, workspace, config):
+    store = Store(postgres_url)
     cfg = inventory_config(config, daily_demand=0)
     saved = definition(store, workspace, cfg)
     baseline = submit(store, workspace, saved, 'baseline')
@@ -229,9 +231,9 @@ def test_comparison_pins_completed_baseline_after_newer_runs(tmp_path, workspace
     assert delta['alternative'] == 20
 
 
-def test_api_reports_async_states_resources_and_validation_strings(tmp_path, workspace, config):
+def test_api_reports_async_states_resources_and_validation_strings(postgres_url, workspace, config):
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
-    app = create_app(tmp_path / 'api.sqlite3', start_worker=False)
+    app = create_app(postgres_url, start_worker=False)
     headers = {'X-Workspace-ID': workspace['id'], 'X-Workspace-Key': secrets.token_urlsafe(32)}
     with TestClient(app) as client:
         assert client.post('/api/prototype/workspaces/guest', headers=headers, json={'workspace': workspace}).status_code == 201
@@ -262,8 +264,8 @@ def test_api_reports_async_states_resources_and_validation_strings(tmp_path, wor
         assert client.get('/api/prototype/runs').status_code == 422
 
 
-def test_autonomous_worker_completes_without_status_polling_and_history_reopens(tmp_path, workspace, config):
-    path = tmp_path / 'worker.sqlite3'
+def test_autonomous_worker_completes_without_status_polling_and_history_reopens(postgres_url, workspace, config):
+    path = postgres_url
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     headers = {'X-Workspace-ID': workspace['id'], 'X-Workspace-Key': secrets.token_urlsafe(32)}
     with TestClient(create_app(path)) as client:
@@ -273,8 +275,8 @@ def test_autonomous_worker_completes_without_status_polling_and_history_reopens(
         assert accepted['status'] == 'queued'
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            with sqlite3.connect(path) as db:
-                status = db.execute('SELECT status FROM runs WHERE id=?', (accepted['id'],)).fetchone()[0]
+            with client.app.state.store.connection() as db:
+                status = db.execute('SELECT status FROM runs WHERE id=?', (accepted['id'],)).fetchone()['status']
             if status == 'succeeded':
                 break
             time.sleep(0.01)
@@ -286,10 +288,10 @@ def test_autonomous_worker_completes_without_status_polling_and_history_reopens(
         assert recovered['attempt'] == 1
 
 
-def test_api_unsupported_user_data_creates_no_fixture_run(tmp_path, workspace, config):
+def test_api_unsupported_user_data_creates_no_fixture_run(postgres_url, workspace, config):
     config.update({'engine': 'lightgbm', 'product_id': 'p1'})
     headers = {'X-Workspace-ID': workspace['id'], 'X-Workspace-Key': secrets.token_urlsafe(32)}
-    with TestClient(create_app(tmp_path / 'api.sqlite3', start_worker=False)) as client:
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         assert client.post('/api/prototype/workspaces/guest', headers=headers, json={'workspace': workspace}).status_code == 201
         saved = client.post('/api/prototype/definitions', headers=headers, json={'name': 'Unsupported model', 'kind': 'forecast', 'config': config}).json()
         response = client.post(f'/api/prototype/definitions/{saved["id"]}/runs', headers=headers, json={'snapshot': workspace, 'idempotency_key': 'unsupported'})
@@ -298,8 +300,8 @@ def test_api_unsupported_user_data_creates_no_fixture_run(tmp_path, workspace, c
         assert client.get('/api/prototype/runs', headers=headers).json() == []
 
 
-def test_only_local_frontend_origins_receive_cors_permission(tmp_path):
-    with TestClient(create_app(tmp_path / 'cors.sqlite3', start_worker=False)) as client:
+def test_only_local_frontend_origins_receive_cors_permission(postgres_url):
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         good = client.options('/api/prototype/runs', headers={'Origin': 'http://127.0.0.1:5173', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'x-workspace-id'})
         assert good.headers['access-control-allow-origin'] == 'http://127.0.0.1:5173'
         bad = client.options('/api/prototype/runs', headers={'Origin': 'https://example.com', 'Access-Control-Request-Method': 'GET'})
@@ -307,7 +309,7 @@ def test_only_local_frontend_origins_receive_cors_permission(tmp_path):
 
 
 @pytest.mark.parametrize('failure', ['exception', 'timeout'])
-def test_worker_failure_and_timeout_end_in_persistent_failure(tmp_path, workspace, config, monkeypatch, failure):
+def test_worker_failure_and_timeout_end_in_persistent_failure(postgres_url, workspace, config, monkeypatch, failure):
     import app.prototype.main as service
 
     def faulty_engine(*_args):
@@ -319,7 +321,7 @@ def test_worker_failure_and_timeout_end_in_persistent_failure(tmp_path, workspac
     monkeypatch.setattr(service, 'execute', faulty_engine)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     headers = {'X-Workspace-ID': workspace['id'], 'X-Workspace-Key': secrets.token_urlsafe(32)}
-    path = tmp_path / 'failure.sqlite3'
+    path = postgres_url
     with TestClient(create_app(path, poll_seconds=0.005, timeout_seconds=0.01)) as client:
         assert client.post('/api/prototype/workspaces/guest', headers=headers, json={'workspace': workspace}).status_code == 201
         saved = client.post('/api/prototype/definitions', headers=headers, json={'name': 'Failure test', 'kind': 'simulation', 'config': config}).json()
@@ -338,8 +340,8 @@ def test_worker_failure_and_timeout_end_in_persistent_failure(tmp_path, workspac
     assert retained['snapshot']['cash']['amount'] == 100
 
 
-def test_pool_membership_cannot_change_under_a_pinned_forecast(tmp_path, workspace, config):
-    store = Store(tmp_path / 'pool.sqlite3')
+def test_pool_membership_cannot_change_under_a_pinned_forecast(postgres_url, workspace, config):
+    store = Store(postgres_url)
     workspace['locations'] = [{'id': 'a'}, {'id': 'b'}]
     workspace['inventoryPools'] = [{'id': 'pool', 'locationIds': ['a']}]
     workspace['sales'][0]['locationId'] = 'a'
@@ -354,8 +356,8 @@ def test_pool_membership_cannot_change_under_a_pinned_forecast(tmp_path, workspa
 
 
 @pytest.mark.parametrize('link', ['baseline', 'forecast'])
-def test_converted_quantity_unit_cannot_reuse_old_analytical_inputs(tmp_path, workspace, config, link):
-    store = Store(tmp_path / 'units.sqlite3')
+def test_converted_quantity_unit_cannot_reuse_old_analytical_inputs(postgres_url, workspace, config, link):
+    store = Store(postgres_url)
     original_config = inventory_config(config) if link == 'baseline' else {**config, 'product_id': 'p1', 'output_families': []}
     original = submit(store, workspace, definition(store, workspace, original_config, 'simulation' if link == 'baseline' else 'forecast'), 'original')
     complete_next(store)

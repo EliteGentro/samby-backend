@@ -4,7 +4,7 @@ This document preserves the first resource-design contract. Its statements about
 
 Frontend domain lives in `src/domain/workspace.ts`. UI and backend snapshots use the same camelCase Workspace JSON. Analytical resources use the snake_case names below. Root owns the domain file, application composition, styles and shared UI primitives. The backend lane owns `samby-backend/app/prototype/` and tests. Business intake lane owns `src/features/data/`. Analytical UI lane owns `src/features/analysis/` and `src/lib/analysis.ts`.
 
-The analytical service is a local prototype using SQLite for durable records and an autonomous server worker. It exposes a standalone FastAPI entrypoint at `app.prototype.main:app`, port 8001. It does not depend on production identity or provisioned PostgreSQL. Binding is localhost. Normal app integration may include the same router later. No live AI or payment actions occur.
+This historical contract originally described SQLite. The current analytical service uses the configured Neon PostgreSQL database for durable records and its autonomous server worker. It exposes a standalone FastAPI entrypoint at `app.prototype.main:app`, port 8001. No live AI or payment actions occur.
 
 API base is `/api/prototype`. Every request has `X-Workspace-ID`, a generated UUID retained locally. Separate IDs isolate demo and business. Production identity and cross-device ownership are deferred. CORS permits only localhost/127.0.0.1 ports 4173 and 5173.
 

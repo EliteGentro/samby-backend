@@ -3,8 +3,9 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 from uuid import UUID, uuid4
+
+from psycopg import IntegrityError
 
 from .schema import validate_workspace
 from .store import ResourceError, Store, dump, now
@@ -56,50 +57,6 @@ def validate_document(workspace: dict) -> dict:
 class Platform:
     def __init__(self, store: Store):
         self.store = store
-        with store.connection() as db:
-            db.executescript('''
-                CREATE TABLE IF NOT EXISTS platform_users (
-                    id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT,
-                    password_hash TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS platform_sessions (
-                    token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES platform_users(id),
-                    expires_at TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS platform_workspaces (
-                    id TEXT PRIMARY KEY REFERENCES namespaces(id), document TEXT NOT NULL,
-                    revision INTEGER NOT NULL, guest_key_hash TEXT, archived INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS platform_memberships (
-                    workspace_id TEXT NOT NULL REFERENCES platform_workspaces(id),
-                    user_id TEXT NOT NULL REFERENCES platform_users(id), role TEXT NOT NULL,
-                    PRIMARY KEY(workspace_id, user_id)
-                );
-                CREATE TABLE IF NOT EXISTS platform_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL,
-                    actor TEXT NOT NULL, action TEXT NOT NULL, revision INTEGER, at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS platform_login_failures (
-                    identity TEXT PRIMARY KEY, failures INTEGER NOT NULL, window_start TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS assistant_sessions (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES platform_workspaces(id) ON DELETE CASCADE,
-                    actor TEXT NOT NULL, title TEXT NOT NULL, page TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS assistant_session_owner
-                    ON assistant_sessions(workspace_id, actor, updated_at);
-                CREATE TABLE IF NOT EXISTS assistant_messages (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL REFERENCES assistant_sessions(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL, content TEXT NOT NULL, page TEXT NOT NULL,
-                    sources TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS assistant_message_session
-                    ON assistant_messages(session_id, created_at);
-            ''')
 
     def _session(self, db, user: dict) -> dict:
         token = secrets.token_urlsafe(32)
@@ -113,7 +70,7 @@ class Platform:
             user = {'id': str(uuid4()), 'email': email, 'name': name, 'created_at': now()}
             try:
                 db.execute('INSERT INTO platform_users VALUES(?,?,?,?,?)', (user['id'], email, name, hashed, user['created_at']))
-            except sqlite3.IntegrityError as error:
+            except IntegrityError as error:
                 raise ResourceError(409, 'An account already exists for this email. Sign in instead.') from error
             return self._session(db, user)
 
@@ -128,7 +85,7 @@ class Platform:
         correct = password_matches(password, user['password_hash']) if user else password_matches(password, password_hash('unavailable-account-password'))
         if not user or not correct:
             with self.store.transaction() as db:
-                db.execute('INSERT INTO platform_login_failures VALUES(?,1,?) ON CONFLICT(identity) DO UPDATE SET failures=CASE WHEN window_start>? THEN failures+1 ELSE 1 END, window_start=CASE WHEN window_start>? THEN window_start ELSE excluded.window_start END', (identity, now(), cutoff, cutoff))
+                db.execute('INSERT INTO platform_login_failures AS existing VALUES(?,1,?) ON CONFLICT(identity) DO UPDATE SET failures=CASE WHEN existing.window_start>? THEN existing.failures+1 ELSE 1 END, window_start=CASE WHEN existing.window_start>? THEN existing.window_start ELSE excluded.window_start END', (identity, now(), cutoff, cutoff))
             raise ResourceError(401, 'Email or password is incorrect.')
         with self.store.transaction() as db:
             db.execute('DELETE FROM platform_login_failures WHERE identity=?', (identity,))
@@ -170,6 +127,7 @@ class Platform:
         document['revision'] = 0
         stamp = now()
         with self.store.transaction() as db:
+            db.execute('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', (document['id'],))
             if db.execute('SELECT 1 FROM namespaces WHERE id=?', (document['id'],)).fetchone():
                 existing = db.execute('SELECT * FROM platform_workspaces WHERE id=?', (document['id'],)).fetchone()
                 member = db.execute('SELECT role FROM platform_memberships WHERE workspace_id=? AND user_id=?', (document['id'], user['id'])).fetchone() if user else None
@@ -202,6 +160,7 @@ class Platform:
         if document['id'] != access['workspace_id']:
             raise ResourceError(422, 'Workspace identity cannot be changed by an update.')
         with self.store.transaction() as db:
+            db.execute('SELECT id FROM namespaces WHERE id=? FOR UPDATE', (access['workspace_id'],)).fetchone()
             row = db.execute('SELECT * FROM platform_workspaces WHERE id=?', (access['workspace_id'],)).fetchone()
             prior = json.loads(row['document'])
             if row['revision'] != expected_revision:
@@ -225,11 +184,14 @@ class Platform:
 
     def claim(self, workspace_id: str, user: dict, guest_key: str | None) -> dict:
         with self.store.transaction() as db:
-            row = db.execute('SELECT guest_key_hash FROM platform_workspaces WHERE id=?', (workspace_id,)).fetchone()
+            row = db.execute('SELECT guest_key_hash FROM platform_workspaces WHERE id=? FOR UPDATE', (workspace_id,)).fetchone()
             if not row or not guest_key or not row['guest_key_hash'] or not hmac.compare_digest(digest(guest_key), row['guest_key_hash']):
                 raise ResourceError(404, 'The guest credential cannot claim this workspace.')
             db.execute('INSERT INTO platform_memberships VALUES(?,?,?)', (workspace_id, user['id'], 'owner'))
-            db.execute('UPDATE assistant_sessions SET actor=? WHERE workspace_id=? AND actor=?', (user['id'], workspace_id, f'guest:{workspace_id}'))
+            db.execute(
+                'UPDATE assistant_sessions SET actor=? WHERE workspace_id=? AND actor=?',
+                (user['id'], workspace_id, f'guest:{workspace_id}'),
+            )
             db.execute('UPDATE platform_workspaces SET guest_key_hash=NULL,updated_at=? WHERE id=?', (now(), workspace_id))
             self._audit(db, workspace_id, user['id'], 'workspace.claim')
         return self.get_workspace({'workspace_id': workspace_id, 'role': 'owner'})
@@ -260,11 +222,12 @@ class Platform:
         if role is not None and role not in ROLES:
             raise ResourceError(422, 'Choose administrator, owner, finance, inventory, buyer or viewer.')
         with self.store.transaction() as db:
+            db.execute('SELECT id FROM platform_workspaces WHERE id=? FOR UPDATE', (access['workspace_id'],)).fetchone()
             user = db.execute('SELECT id FROM platform_users WHERE email=?' if email else 'SELECT id FROM platform_users WHERE id=?', (email or user_id,)).fetchone()
             if not user:
                 raise ResourceError(404, 'The person must register before being added. No invitation message was sent.')
             prior = db.execute('SELECT role FROM platform_memberships WHERE workspace_id=? AND user_id=?', (access['workspace_id'], user['id'])).fetchone()
-            owners = db.execute("SELECT COUNT(*) FROM platform_memberships WHERE workspace_id=? AND role IN ('owner','administrator')", (access['workspace_id'],)).fetchone()[0]
+            owners = db.execute("SELECT COUNT(*) AS count FROM platform_memberships WHERE workspace_id=? AND role IN ('owner','administrator')", (access['workspace_id'],)).fetchone()['count']
             if prior and prior['role'] in {'owner', 'administrator'} and role not in {'owner', 'administrator'} and owners <= 1:
                 raise ResourceError(409, 'A workspace must retain at least one owner or administrator.')
             if role is None:

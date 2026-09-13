@@ -1,5 +1,5 @@
-import re
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -7,88 +7,106 @@ class KnowledgeChunk:
     id: str
     title: str
     pages: tuple[str, ...]
-    content: str
+    text: str
 
 
 PAGE_NAMES = {
-    "home": "Home and onboarding",
+    "home": "Home",
     "inventory": "Inventory",
     "dashboards": "Dashboards",
-    "analysis": "Simulations and forecasts",
+    "analysis": "Forecast & Simulate",
     "finance": "Finance",
-    "data": "Data and imports",
-    "settings": "Settings and access",
+    "data": "Add-ons & Data",
+    "settings": "Settings",
 }
 
 
 CHUNKS = (
     KnowledgeChunk(
         "workspace-overview",
-        "How Samby uses workspace data",
-        tuple(PAGE_NAMES),
-        "Samby keeps one workspace document containing the business profile, products, stock, sales, purchases, finance events, cash, commitments, sources and data coverage. Insights must distinguish recorded values from assumptions and missing data.",
+        "Workspace overview",
+        ("home", "dashboards"),
+        "Home is the operating overview for the selected business or demo workspace. It combines current records, capability readiness, important dates, and next actions. Demo data is synthetic and never mixed with business data.",
     ),
     KnowledgeChunk(
-        "onboarding",
-        "Onboarding and coverage",
+        "onboarding-review",
+        "Reviewed data onboarding",
         ("home", "data"),
-        "Onboarding establishes the business currency, timezone, inventory and financial records, then asks the user to confirm coverage. Supplied means records were provided for a period; absent means reviewed and none exist; unknown means the question still needs review. Unknown coverage should never be treated as zero.",
+        "Samby accepts business profile, products, stock, sales, suppliers, purchases, finance, commitments, and coverage. Imports remain drafts until the user reviews column mapping, amount meaning, units, accepted rows, and exclusions. Unknown values must remain unknown rather than becoming zero.",
     ),
     KnowledgeChunk(
-        "inventory-basics",
-        "Inventory quantities and value",
-        ("inventory", "dashboards", "analysis"),
-        "Available inventory is on-hand less reserved quantity when reservations are known. Inventory value is calculated deterministically from quantity and product unit cost. Quantities with different units must not be added together. Missing costs or reservations should be called out explicitly.",
+        "inventory-current",
+        "Current inventory",
+        ("inventory", "dashboards"),
+        "Inventory connects products, locations, stock positions, reservations, purchases, movements, shared pools, historical observations, receipt layers, and service observations. Available quantity is on-hand less known reservations unless the source explicitly reports an available basis.",
     ),
     KnowledgeChunk(
         "inventory-history",
-        "Inventory history and replenishment",
-        ("inventory", "analysis"),
-        "Forecast and replenishment quality depends on dated demand history, supplier lead time, minimum order quantity, case pack, safety stock and service targets. A forecast is a scenario based on a frozen snapshot, not a promise about future demand.",
+        "Inventory performance metrics",
+        ("inventory", "dashboards"),
+        "Turnover, days inventory outstanding, GMROI, observed fill, in-stock time, aging, and excess require appropriate historical observations. Samby labels accepted constant estimates and does not silently treat missing history as observed history.",
     ),
     KnowledgeChunk(
-        "dashboard-reading",
-        "Reading dashboards",
-        ("dashboards", "home"),
-        "Dashboard cards summarize the current workspace. Users should inspect the underlying date, currency, unit and coverage before acting on a headline number. A useful explanation states what changed, why it matters and which source records support it.",
+        "dashboard-scope",
+        "Dashboard scope",
+        ("dashboards",),
+        "Dashboards summarize only the selected workspace and filters. A metric is unavailable when its required source records or dates are missing. Filters change presentation, not the underlying saved records.",
     ),
     KnowledgeChunk(
-        "simulation-forecast",
-        "Simulations and forecasts",
+        "forecasting",
+        "Forecast logic",
         ("analysis",),
-        "Every analytical run uses an immutable workspace snapshot and explicit assumptions. Forecasts estimate a baseline; simulations apply events or changed assumptions. Compare runs only when their horizon, question, scope and units are compatible.",
+        "Forecasts use captured inputs saved with each run. Naive and seasonal-naive baselines are available; advanced LightGBM and CatBoost forecasts need at least 56 consecutive observed daily quantities before the start and retain a separate chronological 14-day evaluation. Missing daily coverage is not extrapolated silently.",
     ),
     KnowledgeChunk(
-        "finance-basics",
-        "Finance, cash and obligations",
+        "simulations",
+        "Simulation logic",
+        ("analysis",),
+        "Simulations answer focused inventory, cash, debt, collection, demand, supplier, and exploratory questions. Submitted inputs, assumptions, dependencies, and completed artifacts remain attached to the run. A forecast dependency must succeed before it can supply numerical demand to a simulation.",
+    ),
+    KnowledgeChunk(
+        "finance",
+        "Finance records",
         ("finance", "dashboards", "analysis"),
-        "Cash is a point-in-time balance. Receivables, payables and commitments are future or pending movements and should not be mixed with current cash. Outstanding value is amount less paid amount. Amounts in different currencies must be reported separately unless an explicit exchange rate is supplied.",
+        "Finance separates receivables, provider availability, payables, financing, operating obligations, recurring commitments, cash, budgets, and dated payment events. Outstanding values are original amount less recorded paid amount. Current balances are never relabeled as historical evidence.",
     ),
     KnowledgeChunk(
-        "data-quality",
-        "Data sources and quality",
-        ("data", "home", "settings"),
-        "Imported and manually entered records retain source references where available. Data quality checks focus on missing product links, units, costs, currencies, dates and coverage. The guide can explain gaps but must not invent missing business facts.",
+        "standardization",
+        "Standardization and add-ons",
+        ("data", "settings"),
+        "Add-ons & Data shows which capabilities have usable inputs and lets authorized users review standardization proposals. Name, SKU, supplier, price, cost, purchasing unit, and unit-conversion changes retain source identity and an audit trail. Unit conversions require an explicit factor and source.",
     ),
     KnowledgeChunk(
-        "access-sessions",
-        "Access and saved conversations",
+        "workspace-access",
+        "Workspace access and persistence",
         ("settings",),
-        "Workspace access can be guest-based or account-based with roles. Guide conversations belong to the current workspace and actor. When a guest workspace is claimed, its saved conversations move to the new owner account.",
+        "Owners and administrators manage workspace access. Finance, inventory, buyer, and viewer roles have scoped permissions. Business records and analytical history are saved on the backend; unsaved drafts remain on the device and revision conflicts prevent silent overwrites.",
+    ),
+    KnowledgeChunk(
+        "product-boundaries",
+        "Samby boundaries",
+        tuple(PAGE_NAMES),
+        "Samby records and analyzes operational information. It does not execute banking, accounting, purchasing, warehouse, or payment transactions. Recommendations should identify missing inputs and assumptions, and users should verify consequential business decisions.",
     ),
 )
 
 
 def _tokens(value: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", value.lower()))
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2
+    }
 
 
 def retrieve_knowledge(query: str, page: str, limit: int = 4) -> list[KnowledgeChunk]:
-    query_tokens = _tokens(query)
-    ranked: list[tuple[int, KnowledgeChunk]] = []
-    for chunk in CHUNKS:
-        body_tokens = _tokens(f"{chunk.title} {chunk.content}")
-        score = len(query_tokens & body_tokens) * 3 + (5 if page in chunk.pages else 0)
-        ranked.append((score, chunk))
-    ranked.sort(key=lambda item: (-item[0], item[1].id))
-    return [chunk for score, chunk in ranked[:limit] if score > 0]
+    terms = _tokens(query)
+    ranked: list[tuple[int, int, KnowledgeChunk]] = []
+    for index, chunk in enumerate(CHUNKS):
+        searchable = _tokens(f"{chunk.title} {chunk.text}")
+        overlap = len(terms & searchable)
+        page_score = 6 if page in chunk.pages else 0
+        general_score = 1 if len(chunk.pages) == len(PAGE_NAMES) else 0
+        ranked.append((page_score + overlap * 2 + general_score, -index, chunk))
+    ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    return [chunk for score, _index, chunk in ranked[:limit] if score > 0]

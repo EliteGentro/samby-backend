@@ -1,12 +1,14 @@
 import argparse
 import json
-from pathlib import Path
 
+from app.core.config import get_settings
+from app.db.migrations import upgrade_database
 from .platform import Platform
 from .store import Store, ResourceError, dump, now
 
 
 def assign_legacy_owner(database: str, workspace_id: str, email: str) -> None:
+    upgrade_database(database)
     store = Store(database)
     platform = Platform(store)
     with store.transaction() as db:
@@ -23,15 +25,16 @@ def assign_legacy_owner(database: str, workspace_id: str, email: str) -> None:
         db.execute('INSERT INTO platform_workspaces VALUES(?,?,0,NULL,0,?,?)', (workspace_id, dump(document), now(), now()))
         db.execute('INSERT INTO platform_memberships VALUES(?,?,?)', (workspace_id, user['id'], 'owner'))
         platform._audit(db, workspace_id, 'local-cli', f'legacy.ownership:{user["id"]}', 0)
+    store.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Explicit local-only ownership migration for one retained UUID-only analytical namespace.')
-    parser.add_argument('--database', default=str(Path(__file__).parent / 'data' / 'samby.sqlite3'))
+    parser = argparse.ArgumentParser(description='Explicit operator ownership migration for one retained UUID-only analytical namespace.')
+    parser.add_argument('--database-url', default=get_settings().database_url)
     parser.add_argument('--workspace-id', required=True)
     parser.add_argument('--owner-email', required=True)
     args = parser.parse_args()
-    assign_legacy_owner(args.database, args.workspace_id, args.owner_email)
+    assign_legacy_owner(args.database_url, args.workspace_id, args.owner_email)
     print(f'Assigned retained workspace {args.workspace_id} to {args.owner_email}. Saved runs and snapshots were unchanged.')
 
 

@@ -5,8 +5,8 @@ from app.prototype.main import create_app
 from app.prototype.platform_routes import router as platform_router
 
 
-def create_integrated_app(database_path=None, start_worker=True):
-    application = create_app(database_path, start_worker=start_worker)
+def create_integrated_app(database_url=None, start_worker=True):
+    application = create_app(database_url, start_worker=start_worker)
     application.title = 'Samby API'
     application.description = 'Durable business workspaces, authenticated access, reviewed file intake and asynchronous analytics.'
     for route in platform_router.routes:

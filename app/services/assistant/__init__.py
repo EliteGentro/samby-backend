@@ -1,2 +1,1 @@
-"""Contextual Samby Guide services."""
-
+"""Workspace-aware Samby guide services."""

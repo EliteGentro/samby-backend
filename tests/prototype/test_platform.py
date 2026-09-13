@@ -4,7 +4,6 @@ from datetime import datetime
 from io import BytesIO
 import json
 import secrets
-import sqlite3
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -38,9 +37,9 @@ def guest(client, workspace):
     return headers
 
 
-def test_secret_required_for_every_analytical_resource_and_guest_isolation(tmp_path, workspace, config):
+def test_secret_required_for_every_analytical_resource_and_guest_isolation(postgres_url, workspace, config):
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
-    with TestClient(create_app(tmp_path / 'platform.sqlite3', start_worker=False)) as client:
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         headers = guest(client, workspace)
         definition = client.post(f'{BASE}/definitions', headers=headers, json={'name': 'cash', 'kind': 'simulation', 'config': config}).json()
         run = client.post(f'{BASE}/definitions/{definition["id"]}/runs', headers=headers, json={'snapshot': workspace, 'idempotency_key': 'run'}).json()
@@ -56,8 +55,8 @@ def test_secret_required_for_every_analytical_resource_and_guest_isolation(tmp_p
         assert client.get(f'{BASE}/workspaces/{workspace["id"]}', headers=headers).json()['workspace']['mode'] == 'business'
 
 
-def test_workspace_durable_open_fields_conflicts_and_no_implicit_history_rewrite(tmp_path, workspace, config):
-    path = tmp_path / 'durable.sqlite3'
+def test_workspace_durable_open_fields_conflicts_and_no_implicit_history_rewrite(postgres_url, workspace, config):
+    path = postgres_url
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     workspace['inventoryHistory'] = [{'id': 'history1', 'quantity': 5}]
     with TestClient(create_app(path, start_worker=False)) as client:
@@ -82,8 +81,8 @@ def test_workspace_durable_open_fields_conflicts_and_no_implicit_history_rewrite
         assert result['workspace']['inventoryHistory'] == workspace['inventoryHistory']
 
 
-def test_register_login_logout_claim_and_account_restore(tmp_path, workspace):
-    path = tmp_path / 'accounts.sqlite3'
+def test_register_login_logout_claim_and_account_restore(postgres_url, workspace):
+    path = postgres_url
     with TestClient(create_app(path, start_worker=False)) as client:
         guest_headers = guest(client, workspace)
         user = register(client)
@@ -99,18 +98,18 @@ def test_register_login_logout_claim_and_account_restore(tmp_path, workspace):
         assert client.get(f'{BASE}/workspaces', headers=account_headers(login)).json()[0]['id'] == workspace['id']
         assert client.post(f'{BASE}/auth/logout', headers=account_headers(user)).status_code == 204
         assert client.get(f'{BASE}/auth/me', headers=account_headers(user)).status_code == 401
-        with sqlite3.connect(path) as db:
-            stored_password = db.execute('SELECT password_hash FROM platform_users').fetchone()[0]
+        with client.app.state.store.connection() as db:
+            stored_password = db.execute('SELECT password_hash FROM platform_users').fetchone()['password_hash']
             assert 'test-password' not in stored_password
-            assert db.execute('SELECT token_hash FROM platform_sessions').fetchone()[0] != login['access_token']
+            assert db.execute('SELECT token_hash FROM platform_sessions').fetchone()['token_hash'] != login['access_token']
     with TestClient(create_app(path, start_worker=False)) as client:
         assert client.get(f'{BASE}/auth/me', headers=account_headers(login)).json()['email'] == 'owner@example.test'
         assert client.get(f'{BASE}/workspaces', headers=account_headers(login)).json()[0]['role'] == 'owner'
 
 
 @pytest.mark.parametrize('role,field,allowed', [('finance', 'cash', True), ('finance', 'stock', False), ('inventory', 'stock', True), ('inventory', 'cash', False), ('buyer', 'purchases', True), ('buyer', 'stock', False), ('viewer', 'cash', False)])
-def test_actual_role_enforcement_on_workspace_and_analytical_writes(tmp_path, workspace, config, role, field, allowed):
-    with TestClient(create_app(tmp_path / 'roles.sqlite3', start_worker=False)) as client:
+def test_actual_role_enforcement_on_workspace_and_analytical_writes(postgres_url, workspace, config, role, field, allowed):
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         owner = register(client)
         member = register(client, 'member@example.test')
         owner_headers = account_headers(owner, workspace)
@@ -136,8 +135,8 @@ def test_actual_role_enforcement_on_workspace_and_analytical_writes(tmp_path, wo
         assert forecast.status_code == (201 if role in {'inventory', 'buyer'} else 403)
 
 
-def test_last_owner_membership_revocation_and_archive_preserve_records(tmp_path, workspace):
-    with TestClient(create_app(tmp_path / 'ownership.sqlite3', start_worker=False)) as client:
+def test_last_owner_membership_revocation_and_archive_preserve_records(postgres_url, workspace):
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         owner = register(client)
         member = register(client, 'member@example.test')
         headers = account_headers(owner, workspace)
@@ -157,7 +156,7 @@ def test_last_owner_membership_revocation_and_archive_preserve_records(tmp_path,
         assert client.post(f'{BASE}/workspaces/{workspace["id"]}/restore', headers=headers).json()['archived'] is False
 
 
-def test_native_xlsx_multiple_sheets_preview_does_not_commit(tmp_path, workspace):
+def test_native_xlsx_multiple_sheets_preview_does_not_commit(postgres_url, workspace):
     from openpyxl import Workbook
     book = Workbook()
     book.active.title = 'Instructions'
@@ -168,7 +167,7 @@ def test_native_xlsx_multiple_sheets_preview_does_not_commit(tmp_path, workspace
     sales.append([datetime(2026, 9, 11), 'ABC', 2, 24.5])
     target = BytesIO()
     book.save(target)
-    with TestClient(create_app(tmp_path / 'excel.sqlite3', start_worker=False)) as client:
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         headers = guest(client, workspace)
         response = client.post(f'{BASE}/imports/preview', headers=headers, files={'file': ('sales.xlsx', target.getvalue())}, data={'sheet_name': 'Sales'})
         assert response.status_code == 200, response.text
@@ -186,7 +185,7 @@ def test_native_xlsx_multiple_sheets_preview_does_not_commit(tmp_path, workspace
         assert client.post(f'{BASE}/imports/preview', headers=headers, files={'file': ('huge.xlsx', b'x' * 5_000_001)}).status_code == 413
 
 
-def test_native_xls_preview_reads_numeric_and_date_cells(tmp_path, workspace):
+def test_native_xls_preview_reads_numeric_and_date_cells(postgres_url, workspace):
     import xlwt
     book = xlwt.Workbook()
     sheet = book.add_sheet('Sales')
@@ -197,15 +196,15 @@ def test_native_xls_preview_reads_numeric_and_date_cells(tmp_path, workspace):
     sheet.write(1, 2, 3)
     output = BytesIO()
     book.save(output)
-    with TestClient(create_app(tmp_path / 'xls.sqlite3', start_worker=False)) as client:
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         headers = guest(client, workspace)
         response = client.post(f'{BASE}/workspaces/{workspace["id"]}/imports/preview', headers=headers, files={'file': ('legacy.xls', output.getvalue())})
         assert response.status_code == 200, response.text
         assert response.json()['rows'] == [['2026-09-11', 'LEGACY', '3']]
 
 
-def test_existing_uuid_cannot_be_claimed_over_http_and_cli_migration_is_explicit(tmp_path, workspace, config):
-    path = tmp_path / 'legacy.sqlite3'
+def test_existing_uuid_cannot_be_claimed_over_http_and_cli_migration_is_explicit(postgres_url, workspace, config):
+    path = postgres_url
     store = Store(path)
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     definition = store.create_definition(workspace['id'], {'name': 'Legacy', 'kind': 'simulation', 'config': config})
@@ -222,33 +221,31 @@ def test_existing_uuid_cannot_be_claimed_over_http_and_cli_migration_is_explicit
         assert client.get(f'{BASE}/workspaces', headers=headers).json()[0]['id'] == workspace['id']
 
 
-def test_original_app_has_platform_lifespan_auth_alias_and_no_postgres_requirement(tmp_path, workspace):
-    with TestClient(create_integrated_app(tmp_path / 'main.sqlite3', start_worker=False)) as client:
+def test_original_app_has_platform_lifespan_auth_alias_and_postgres_persistence(postgres_url, workspace):
+    with TestClient(create_integrated_app(postgres_url, start_worker=False)) as client:
         auth = client.post('/api/v1/auth/register', json={'email': 'main@example.test', 'password': 'test-password-123'})
         assert auth.status_code == 201
         headers = account_headers(auth.json(), workspace)
         assert client.post(f'{BASE}/workspaces', headers=headers, json={'workspace': workspace}).status_code == 201
         assert client.get('/api/v1/auth/me', headers=headers).json()['email'] == 'main@example.test'
-        assert client.get(f'{BASE}/health').json()['persistence'] == 'sqlite'
+        assert client.get(f'{BASE}/health').json()['persistence'] == 'postgresql'
 
 
-def test_private_keys_and_session_expiry_are_enforced(tmp_path, workspace):
-    path = tmp_path / 'expiry.sqlite3'
+def test_private_keys_and_session_expiry_are_enforced(postgres_url, workspace):
+    path = postgres_url
     with TestClient(create_app(path, start_worker=False)) as client:
         assert client.post(f'{BASE}/workspaces/guest', json={'workspace': workspace}).status_code == 422
         headers = guest(client, workspace)
         assert client.post(f'{BASE}/workspaces/guest', headers=headers, json={'workspace': workspace}).status_code == 201
         user = register(client)
-        with sqlite3.connect(path) as db:
-            assert db.execute('SELECT guest_key_hash FROM platform_workspaces').fetchone()[0] != headers['X-Workspace-Key']
+        with client.app.state.store.transaction() as db:
+            assert db.execute('SELECT guest_key_hash FROM platform_workspaces').fetchone()['guest_key_hash'] != headers['X-Workspace-Key']
             db.execute("UPDATE platform_sessions SET expires_at='2000-01-01'")
         assert client.get(f'{BASE}/auth/me', headers=account_headers(user)).status_code == 401
 
 
-def test_export_and_consistent_backup_retain_current_records_accounts_and_analytical_history(tmp_path, workspace, config):
-    from app.prototype.backup import backup_database
-    path = tmp_path / 'original.sqlite3'
-    backup = tmp_path / 'backup.sqlite3'
+def test_export_and_postgres_restart_retain_current_records_and_analytical_history(postgres_url, workspace, config):
+    path = postgres_url
     workspace['finance'] = [event('payment', 10, '2026-09-12')]
     with TestClient(create_app(path, start_worker=False)) as client:
         headers = guest(client, workspace)
@@ -257,16 +254,13 @@ def test_export_and_consistent_backup_retain_current_records_accounts_and_analyt
         assert export.headers['content-disposition'].startswith('attachment;')
         saved = client.post(f'{BASE}/definitions', headers=headers, json={'name': 'Retained cash', 'kind': 'simulation', 'config': config}).json()
         run = client.post(f'{BASE}/definitions/{saved["id"]}/runs', headers=headers, json={'snapshot': workspace, 'idempotency_key': 'backup'}).json()
-        backup_database(str(path), str(backup))
-        with pytest.raises(ValueError, match='never overwritten'):
-            backup_database(str(path), str(backup))
-    with TestClient(create_app(backup, start_worker=False)) as restored:
+    with TestClient(create_app(path, start_worker=False)) as restored:
         assert restored.get(f'{BASE}/workspaces/{workspace["id"]}', headers=headers).json()['workspace'] == workspace
         assert restored.get(f'{BASE}/runs/{run["id"]}', headers=headers).json()['snapshot'] == workspace
 
 
-def test_login_rate_limit_is_persisted_and_generic(tmp_path):
-    path = tmp_path / 'rate.sqlite3'
+def test_login_rate_limit_is_persisted_and_generic(postgres_url):
+    path = postgres_url
     with TestClient(create_app(path, start_worker=False)) as client:
         register(client)
         for _ in range(10):
@@ -276,8 +270,8 @@ def test_login_rate_limit_is_persisted_and_generic(tmp_path):
         assert client.post(f'{BASE}/auth/login', json={'email': 'owner@example.test', 'password': 'incorrect-password'}).status_code == 429
 
 
-def test_finance_role_can_preserve_pending_records_without_converting_unknowns_to_zero(tmp_path, workspace):
-    path = tmp_path / 'pending.sqlite3'
+def test_finance_role_can_preserve_pending_records_without_converting_unknowns_to_zero(postgres_url, workspace):
+    path = postgres_url
     with TestClient(create_app(path, start_worker=False)) as client:
         owner = register(client)
         member = register(client, 'finance@example.test')
@@ -296,9 +290,9 @@ def test_finance_role_can_preserve_pending_records_without_converting_unknowns_t
         assert restored['pendingFinance'][0]['paidAmount'] == 0
 
 
-def test_dated_finance_observations_persist_under_finance_role_without_changing_cash(tmp_path, workspace):
+def test_dated_finance_observations_persist_under_finance_role_without_changing_cash(postgres_url, workspace):
     workspace['finance'] = [event('invoice', 100, '2026-09-12', 'receivable', paidAmount=40)]
-    with TestClient(create_app(tmp_path / 'history.sqlite3', start_worker=False)) as client:
+    with TestClient(create_app(postgres_url, start_worker=False)) as client:
         owner = register(client)
         member = register(client, 'finance-history@example.test')
         headers = account_headers(owner, workspace)

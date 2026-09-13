@@ -11,6 +11,7 @@ QUESTIONS = {
     'Q-NEW-ORDER', 'Q-REPLENISH', 'Q-CRITICAL-COLLECTION',
     'Q-CASH-SUFFICIENCY', 'Q-DEMAND-CHANGE', 'Q-SLOW-SUPPLIER',
     'Q-CUSTOMER-DEBT', 'Q-SUPPLIER-ORDER-STOCKOUT', 'Q-EXPLORE',
+    'Q-POISON-APPLE', 'Q-DEAD-STOCK', 'Q-TREASURY-STRESS',
 }
 CATEGORIES = ('collections', 'suppliers', 'payroll', 'rent', 'taxes', 'financing', 'other')
 ASSUMPTIONS = {
@@ -23,7 +24,19 @@ ASSUMPTIONS = {
     'backlog_reservation_overlap', 'supplier_terms_id', 'customer_terms_id', 'terms_accepted', 'terms_no_advance_confirmed',
     'demand_cash_treatment', 'purchase_cash_treatment', 'purchase_paid_amount', 'purchase_invoice_date',
     'invoice_delay_days', 'customer_order_date', 'customer_advance_received', 'new_credit_sales_amount', 'new_credit_sales_date', 'unpaid_share', 'order_policy', 'reorder_point', 'safety_stock', 'service_target', 'discount_percent',
+    'asem_stress',
+    # Poison Apple (Growth Insolvency)
+    'poison_order_amount', 'poison_margin_pct', 'poison_supplier_advance_pct',
+    'poison_supplier_balance_days', 'poison_customer_days', 'poison_fixed_daily_costs',
+    # Dead Stock Liberator
+    'dio_threshold', 'liquidation_discount_pct', 'liquidation_days', 'holding_cost_daily_pct',
+    # Treasury Edge Cases
+    'payroll_amount', 'payroll_dates', 'payroll_buffer_days',
+    'banking_cutoff_apply', 'weekend_shift_apply',
+    'paused_supplier_ids', 'spiral_product_ids', 'spiral_restock_penalty_days',
+    'disputed_record_ids', 'dispute_resolution_days', 'dispute_recovery_pct',
 }
+
 
 
 class InputError(ValueError):
@@ -85,7 +98,7 @@ class AnalysisConfig(BaseModel):
     @classmethod
     def question_valid(cls, value: str) -> str:
         if value not in QUESTIONS:
-            raise ValueError('Choose one of the eight focused questions or Q-EXPLORE.')
+            raise ValueError('Choose one of the supported focused questions or Q-EXPLORE.')
         return value
 
     @field_validator('assumptions')
@@ -102,7 +115,7 @@ class AnalysisConfig(BaseModel):
             elif name in {'collection_id', 'purchase_id', 'supplier_terms_id', 'customer_terms_id', 'payment_id'}:
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f'{name} must identify a supplied record.')
-            elif name in {'stock_opening_confirmed', 'opening_backlog_confirmed', 'terms_accepted', 'terms_no_advance_confirmed', 'payment_change_accepted', 'supplier_payment_before_dispatch'}:
+            elif name in {'stock_opening_confirmed', 'opening_backlog_confirmed', 'terms_accepted', 'terms_no_advance_confirmed', 'payment_change_accepted', 'supplier_payment_before_dispatch', 'asem_stress', 'banking_cutoff_apply', 'weekend_shift_apply'}:
                 if not isinstance(value, bool):
                     raise ValueError(f'{name} must be true or false.')
             elif name in {'order_policy', 'backlog_policy', 'backlog_reservation_overlap', 'demand_cash_treatment', 'purchase_cash_treatment'}:
@@ -112,18 +125,26 @@ class AnalysisConfig(BaseModel):
             elif name == 'forecast_overlap':
                 if value not in {'replacement', 'incremental'}:
                     raise ValueError('forecast_overlap must be replacement or incremental.')
+            elif name in {'payroll_dates', 'paused_supplier_ids', 'spiral_product_ids', 'disputed_record_ids'}:
+                if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                    raise ValueError(f'{name} must be a list of nonempty strings.')
+                if name == 'payroll_dates':
+                    for date_value in value:
+                        day(date_value, f'{name} entry')
             else:
                 minimum = None if name in {'cash_opening_estimate', 'collection_delay_days'} else 0
                 numeric(value, name, minimum)
-                if name in {'lead_time_days', 'collection_delay_days', 'season_length_days', 'invoice_delay_days'}:
+                if name in {'lead_time_days', 'collection_delay_days', 'season_length_days', 'invoice_delay_days', 'poison_supplier_balance_days', 'poison_customer_days', 'liquidation_days', 'payroll_buffer_days', 'spiral_restock_penalty_days', 'dispute_resolution_days'}:
                     if int(value) != value:
                         raise ValueError(f'{name} must contain whole calendar days.')
-                if name in {'service_target', 'discount_percent'} and value > 100:
+                if name in {'service_target', 'discount_percent', 'poison_margin_pct', 'poison_supplier_advance_pct', 'liquidation_discount_pct', 'dispute_recovery_pct'} and value > 100:
                     raise ValueError(f'{name} must be between 0 and 100.')
                 if name == 'unpaid_share' and value > 1:
                     raise ValueError('unpaid_share must be between 0 and 1.')
                 if name == 'season_length_days' and not 1 <= value <= 365:
                     raise ValueError('season_length_days must be between 1 and 365.')
+                if name == 'dio_threshold' and value < 1:
+                    raise ValueError('dio_threshold must be at least 1 day.')
         return values
 
 
