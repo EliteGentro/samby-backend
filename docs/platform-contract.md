@@ -47,7 +47,7 @@ File limit: 5 MB; selected sheet: 10,000 data rows and 200 columns; expanded XLS
 
 ## Durable boundary
 
-SQLite stores password/session hashes, current Workspace JSON, memberships, access audit events and existing analytical resources. Immutable run inputs and artifacts retain their prior contract versions. Current workspace edits and ownership migration cannot rewrite them. No production payment execution, external account invitation or live AI service is implied by these endpoints.
+Neon PostgreSQL stores password/session hashes, current Workspace JSON, memberships, access audit events and existing analytical resources. Alembic applies the schema before startup. Immutable run inputs and artifacts retain their prior contract versions through PostgreSQL triggers. Current workspace edits and ownership migration cannot rewrite them. No production payment execution, external account invitation or live AI service is implied by these endpoints.
 
 ## Financial observations
 

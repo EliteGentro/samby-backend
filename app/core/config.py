@@ -1,8 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,8 +21,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     log_level: str = "INFO"
 
-    database_url: str = "postgresql+asyncpg://app:app@localhost:5432/app"
+    database_url: str = "postgresql+psycopg://app:app@localhost:5432/app"
     database_connect_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    database_pool_max_connections: int = Field(default=5, ge=1, le=20)
 
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = Field(default=5, ge=1, le=20)
@@ -47,24 +46,17 @@ class Settings(BaseSettings):
 
     @field_validator("database_url", mode="before")
     @classmethod
-    def use_async_postgresql_driver(cls, value: str) -> str:
-        """Accept the URL format emitted by most hosted PostgreSQL providers."""
+    def use_psycopg_driver(cls, value: str) -> str:
+        """Normalize hosted PostgreSQL/Neon URLs for SQLAlchemy and psycopg."""
         if value.startswith("postgres://"):
-            value = value.replace("postgres://", "postgresql+asyncpg://", 1)
+            value = value.replace("postgres://", "postgresql+psycopg://", 1)
         elif value.startswith("postgresql://"):
-            value = value.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-        if not value.startswith("postgresql+asyncpg://"):
-            return value
-
-        parsed = urlsplit(value)
-        query = []
-        for key, item in parse_qsl(parsed.query, keep_blank_values=True):
-            if key == "sslmode":
-                query.append(("ssl", item))
-            elif key != "channel_binding":
-                query.append((key, item))
-        return urlunsplit(parsed._replace(query=urlencode(query)))
+            value = value.replace("postgresql://", "postgresql+psycopg://", 1)
+        elif value.startswith("postgresql+asyncpg://"):
+            value = value.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        if not value.startswith("postgresql+psycopg://"):
+            raise ValueError("DATABASE_URL must be a PostgreSQL connection URL")
+        return value
 
     @model_validator(mode="after")
     def require_secure_production_jwt_secret(self) -> "Settings":

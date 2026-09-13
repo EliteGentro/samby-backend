@@ -45,6 +45,39 @@ class OpenRouterProvider(AIProvider):
             }
         return payload
 
+    async def complete_chat(
+        self,
+        messages: list[dict],
+        options: AIOptions,
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """Return one OpenAI-compatible assistant message.
+
+        Samby's workspace guide uses this non-streaming path so tool calls can be
+        executed deterministically before the final answer is persisted.
+        """
+        payload: dict = {
+            "model": options.model or self.settings.openrouter_model,
+            "messages": messages,
+            "max_tokens": options.max_tokens,
+            "temperature": options.temperature,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        response = await self.client.post(
+            f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+            headers=self.headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        body = response.json()
+        choices = body.get("choices") or []
+        if not choices or not isinstance(choices[0].get("message"), dict):
+            raise RuntimeError("OpenRouter returned no assistant message")
+        return choices[0]["message"]
+
     async def stream_chat(
         self, messages: list[ChatMessage], options: AIOptions
     ) -> AsyncIterator[AIChunk]:

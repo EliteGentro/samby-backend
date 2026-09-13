@@ -1,6 +1,6 @@
 # Run Samby locally
 
-The integrated FastAPI application stores current business workspaces, accounts, memberships, analytical definitions, immutable input snapshots, runs and results in SQLite. The frontend uses private guest credentials or an account session for every workspace and analytical request.
+The integrated FastAPI application stores current business workspaces, accounts, memberships, analytical definitions, immutable input snapshots, runs and results in Neon PostgreSQL. The frontend uses private guest credentials or an account session for every workspace and analytical request.
 
 ## Install and start
 
@@ -18,13 +18,13 @@ On macOS, LightGBM also needs the OpenMP runtime:
 brew install libomp
 ```
 
-`app.prototype.main:app` remains an equivalent standalone entry point. The integrated entry point also supplies `/api/v1/auth/*` compatibility routes. PostgreSQL and Redis are not required. The previous template's examples, Redis events, health and AI routes are opt-in through `SAMBY_ENABLE_LEGACY_TEMPLATE=1` and require their original dependencies.
+`app.prototype.main:app` remains an equivalent standalone entry point. The integrated entry point also supplies `/api/v1/auth/*` compatibility routes. PostgreSQL is required; Redis is not. The previous template's examples, Redis events, health and AI routes are opt-in through `SAMBY_ENABLE_LEGACY_TEMPLATE=1` and require their original dependencies.
 
 The service health endpoint is `http://127.0.0.1:8001/api/prototype/health`. Frontend origins `localhost` and `127.0.0.1` on ports 5173 and 4173 are allowed.
 
-## Storage and access
+## PostgreSQL storage and access
 
-The database defaults to `app/prototype/data/samby.sqlite3`. Set `SAMBY_PROTOTYPE_DB` to use another path. Keep the database and its SQLite companion files between restarts; database removal would remove local accounts, workspaces and histories.
+Set `DATABASE_URL` to the Neon connection URL. The app accepts the common hosted PostgreSQL URL schemes and uses psycopg connections. It automatically applies all Alembic migrations before starting the API or worker. A connection or migration error stops startup; there is no SQLite fallback. The worker uses PostgreSQL row locks and `FOR UPDATE SKIP LOCKED` to claim a queued run once across concurrent processes.
 
 A new guest workspace requires a client-generated random private `X-Workspace-Key` with at least 32 characters. The server stores only its hash. It accepts an unused UUID and never grants access merely from knowing a UUID. Repeating an identical initial creation with the same key is safe.
 
@@ -66,12 +66,6 @@ The suite covers financial and inventory arithmetic, forecast training, dates an
 
 ## Retention, export and backup
 
-Local records are retained indefinitely. Archive is reversible; it does not purge current documents or immutable analytical evidence. There is no automatic retention purge. Authenticated `GET /api/prototype/workspaces/{id}/export` downloads the current Workspace JSON and its server revision. A full database backup also retains accounts, memberships and analytical histories:
-
-```sh
-.venv/bin/python -m app.prototype.backup --destination /absolute/path/samby-backup.sqlite3
-```
-
-The backup uses SQLite's online backup operation, includes committed WAL state, verifies integrity and refuses to overwrite an existing path. To recover, stop the service and start it with `SAMBY_PROTOTYPE_DB` pointing at the verified backup or a copy. Preserve the prior database until verification completes. Keep backups private because they contain business data and credential hashes.
+Records are retained indefinitely. Archive is reversible; it does not purge current documents or immutable analytical evidence. There is no automatic retention purge. Authenticated `GET /api/prototype/workspaces/{id}/export` downloads the current Workspace JSON and its server revision. Use Neon branches, point-in-time restore, or `pg_dump` for complete database recovery. Backups contain business data and credential hashes and must remain private.
 
 Ten failed sign-ins for one email/client pair within 15 minutes trigger a persistent temporary rate limit. Invalid-account/password errors are generic. No external email/password-recovery provider is configured. Legacy namespace ownership is never assigned automatically; the local CLI requires an exact retained namespace and an already registered target account.

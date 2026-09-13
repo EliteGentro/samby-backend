@@ -27,7 +27,6 @@ def test_settings_normalize_hosted_postgresql_urls() -> None:
         )
     )
 
-    assert settings.database_url.startswith("postgresql+asyncpg://")
-    assert "ssl=require" in settings.database_url
-    assert "sslmode" not in settings.database_url
-    assert "channel_binding" not in settings.database_url
+    assert settings.database_url.startswith("postgresql+psycopg://")
+    assert "sslmode=require" in settings.database_url
+    assert "channel_binding=require" in settings.database_url
